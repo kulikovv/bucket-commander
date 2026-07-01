@@ -20,6 +20,7 @@ from bc.ui.commands import (
     move_cursor,
     refresh,
     switch_focus,
+    toggle_selection,
 )
 from bc.ui.panels import render_app
 
@@ -61,20 +62,17 @@ class BucketCommanderApp:
             raise urwid.ExitMainLoop()
         if key == "tab":
             self._update(switch_focus(self._state))
-            return
-        if key == "up":
+        elif key == "up":
             self._update(move_cursor(self._state, -1))
-            return
-        if key == "down":
+        elif key == "down":
             self._update(move_cursor(self._state, 1))
-            return
-        if key in {"enter", "right"}:
+        elif key in {"enter", " ", "right"}:
             self._run_command(lambda: enter(self._state, self._backend))
-            return
-        if key in {"backspace", "left"}:
+        elif key in {"s", "S"}:
+            self._update(toggle_selection(self._state))
+        elif key in {"backspace", "left"}:
             self._run_command(lambda: go_parent(self._state, self._backend))
-            return
-        if key in {"r", "R", "ctrl r"}:
+        elif key in {"r", "R", "ctrl r"}:
             self._refresh_panel(self._state.focused)
 
     def _refresh_panel(self, panel_id: PanelId) -> None:
@@ -104,9 +102,10 @@ def run_app(config: AppConfig) -> int:
 def _palette() -> list[tuple[str, str, str]]:
     return [
         ("panel_header", "black", "light gray"),
-        ("panel_header_focus", "black", "yellow"),
+        ("panel_border", "dark gray", "black"),
+        ("panel_border_focus", "yellow", "black"),
         ("panel_body", "light gray", "black"),
-        ("entry_focus", "black", "light cyan"),
+        ("entry_current", "black", "light cyan"),
         ("footer", "black", "light gray"),
         ("error", "light red", "black"),
     ]

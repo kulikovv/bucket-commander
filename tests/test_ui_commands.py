@@ -15,6 +15,7 @@ from bc.ui.commands import (
     move_cursor,
     refresh,
     switch_focus,
+    toggle_selection,
 )
 
 T = TypeVar("T")
@@ -32,9 +33,9 @@ def test_refresh_loads_entries_for_panel(tmp_path: Path, panel_id: PanelId) -> N
     refreshed = run_async(refresh(state, panel_id, LocalBackend()))
 
     panel = refreshed.panel(panel_id)
-    assert [entry.name for entry in panel.entries] == ["alpha", "bravo.txt"]
+    assert [entry.name for entry in panel.entries] == ["..", "alpha", "bravo.txt"]
     assert not panel.is_loading
-    assert "2 entries" in refreshed.status_message
+    assert "3 entries" in refreshed.status_message
 
 
 def test_switch_focus_toggles_active_panel(tmp_path: Path) -> None:
@@ -61,6 +62,23 @@ def test_move_cursor_updates_focused_panel_only(tmp_path: Path) -> None:
     assert moved.right.cursor_index == 0
 
 
+def test_toggle_selection_marks_focused_panel_current_entry(tmp_path: Path) -> None:
+    first = Entry(location=parse_location(tmp_path / "a"), name="a", entry_type=EntryType.FILE)
+    second = Entry(location=parse_location(tmp_path / "b"), name="b", entry_type=EntryType.FILE)
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path), entries=(first, second), cursor_index=1),
+        right=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+    )
+
+    selected = toggle_selection(state)
+    unselected = toggle_selection(selected)
+
+    assert selected.left.selected_entries == (second,)
+    assert selected.right.selected_entries == ()
+    assert selected.status_message == "Selected b"
+    assert unselected.left.selected_entries == ()
+
+
 def test_enter_directory_refreshes_active_panel(tmp_path: Path) -> None:
     directory = tmp_path / "directory"
     directory.mkdir()
@@ -78,7 +96,26 @@ def test_enter_directory_refreshes_active_panel(tmp_path: Path) -> None:
     entered = run_async(enter(state, LocalBackend()))
 
     assert entered.left.location == parse_location(directory)
-    assert [entry.name for entry in entered.left.entries] == ["inside.txt"]
+    assert [entry.name for entry in entered.left.entries] == ["..", "inside.txt"]
+
+
+def test_enter_parent_entry_navigates_up(tmp_path: Path) -> None:
+    child = tmp_path / "child"
+    child.mkdir()
+    parent_entry = Entry(
+        location=parse_location(tmp_path),
+        name="..",
+        entry_type=EntryType.DIRECTORY,
+    )
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(child), entries=(parent_entry,)),
+        right=PanelState(location=parse_location(child)),
+    )
+
+    entered = run_async(enter(state, LocalBackend()))
+
+    assert entered.left.location == parse_location(tmp_path)
+    assert "child" in [entry.name for entry in entered.left.entries]
 
 
 def test_enter_file_reports_status_without_navigation(tmp_path: Path) -> None:

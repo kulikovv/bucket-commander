@@ -34,28 +34,94 @@ def render_app(state: TwoPanelState) -> urwid.Widget:
 def render_panel(panel: PanelState, *, title: str, is_focused: bool) -> urwid.Widget:
     """Render a single file panel."""
 
-    header_attr = "panel_header_focus" if is_focused else "panel_header"
     status = " loading" if panel.is_loading else ""
     header = urwid.AttrMap(
-        urwid.Text(f" {title}: {panel.location.label}{status}", wrap="clip"),
-        header_attr,
+        urwid.Text(
+            f" {title}: {panel.location.label}{status} [{len(panel.selected_entries)} marked]",
+            wrap="clip",
+        ),
+        "panel_header",
     )
-    rows = [_entry_row(entry) for entry in panel.entries]
+    rows = [
+        _entry_row(
+            entry,
+            is_current=index == panel.cursor_index,
+            is_marked=entry.uri in panel.selected_uris,
+        )
+        for index, entry in enumerate(panel.entries)
+    ]
     if not rows:
         rows = [urwid.Text("  <empty>")]
     walker = urwid.SimpleFocusListWalker(rows)
     if panel.entries:
         walker.set_focus(panel.cursor_index)
-    list_box = urwid.ListBox(walker)
-    body = urwid.AttrMap(list_box, "panel_body", "entry_focus")
-    return urwid.Frame(body=body, header=header)
+    list_box = PanelListBox(walker)
+    body = urwid.AttrMap(list_box, "panel_body")
+    panel_frame: urwid.Widget = urwid.Frame(body=body, header=header)
+    border_attr = "panel_border_focus" if is_focused else "panel_border"
+    return _bordered(panel_frame, border_attr)
 
 
-def _entry_row(entry: Entry) -> urwid.Widget:
+def _entry_row(entry: Entry, *, is_current: bool, is_marked: bool) -> urwid.Widget:
+    current = ">" if is_current else " "
+    selected = "*" if is_marked else " "
     marker = _entry_marker(entry.entry_type)
     size = _format_size(entry)
     modified = _format_datetime(entry.modified_at)
-    return urwid.Text(f" {marker} {entry.name:<40.40} {size:>10} {modified}", wrap="clip")
+    row = urwid.Text(
+        f"{current}{selected} {marker} {entry.name:<38.38} {size:>10} {modified}",
+        wrap="clip",
+    )
+    if is_current:
+        return urwid.AttrMap(row, "entry_current")
+    return row
+
+
+def _bordered(widget: urwid.Widget, attr: str) -> urwid.Widget:
+    top = _border_line("┌", "┐", attr)
+    bottom = _border_line("└", "┘", attr)
+    left = urwid.AttrMap(urwid.SolidFill("│"), attr)
+    right = urwid.AttrMap(urwid.SolidFill("│"), attr)
+    middle = urwid.Columns(
+        [
+            ("given", 1, left),
+            ("weight", 1, widget),
+            ("given", 1, right),
+        ]
+    )
+    return urwid.Pile(
+        [
+            ("pack", top),
+            ("weight", 1, middle),
+            ("pack", bottom),
+        ]
+    )
+
+
+def _border_line(left: str, right: str, attr: str) -> urwid.Widget:
+    return urwid.AttrMap(
+        urwid.Columns(
+            [
+                ("given", 1, urwid.Text(left)),
+                ("weight", 1, urwid.Divider("─")),
+                ("given", 1, urwid.Text(right)),
+            ]
+        ),
+        attr,
+    )
+
+
+class PanelListBox(urwid.ListBox):
+    """ListBox that lets application state own panel cursor movement."""
+
+    def keypress(self, size: tuple[()] | tuple[int] | tuple[int, int], key: str) -> str | None:
+        if key in {"up", "down"}:
+            return key
+        match size:
+            case (width, height):
+                return super().keypress((width, height), key)
+            case _:
+                return key
 
 
 def _entry_marker(entry_type: EntryType) -> str:

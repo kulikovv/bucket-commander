@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from bc.backends import Backend
-from bc.core import EntryType, LocalLocation, PanelState
+from bc.core import Entry, EntryType, LocalLocation, PanelState
 
 
 class PanelId(StrEnum):
@@ -54,6 +54,15 @@ def move_cursor(state: TwoPanelState, delta: int) -> TwoPanelState:
     return state.with_panel(state.focused, panel)
 
 
+def toggle_selection(state: TwoPanelState) -> TwoPanelState:
+    panel = state.active.toggle_selection()
+    entry = panel.current_entry
+    if entry is None:
+        return state.with_status("No entry selected")
+    action = "Selected" if entry.uri in panel.selected_uris else "Unselected"
+    return state.with_panel(state.focused, panel).with_status(f"{action} {entry.name}")
+
+
 async def refresh(
     state: TwoPanelState,
     panel_id: PanelId,
@@ -62,7 +71,7 @@ async def refresh(
     panel = state.panel(panel_id)
     loading_panel = replace(panel, is_loading=True, status_message="Loading")
     loading_state = state.with_panel(panel_id, loading_panel)
-    entries = await backend.list(panel.location)
+    entries = _with_parent_entry(panel.location, await backend.list(panel.location))
     refreshed_panel = replace(
         loading_panel,
         entries=entries,
@@ -97,3 +106,13 @@ async def go_parent(state: TwoPanelState, backend: Backend) -> TwoPanelState:
         return state.with_status("Already at filesystem root")
     next_state = state.with_panel(state.focused, PanelState(location=parent))
     return await refresh(next_state, state.focused, backend)
+
+
+def _with_parent_entry(location: object, entries: tuple[Entry, ...]) -> tuple[Entry, ...]:
+    if not isinstance(location, LocalLocation):
+        return entries
+    parent = location.parent()
+    if parent is None:
+        return entries
+    parent_entry = Entry(location=parent, name="..", entry_type=EntryType.DIRECTORY)
+    return (parent_entry, *entries)
