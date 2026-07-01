@@ -1,0 +1,85 @@
+[project]
+name = "bucket-commander"
+version = "0.1.0"
+description = "Two-panel terminal file manager for local files and object-storage buckets."
+readme = "SPECIFICATION.md"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1.0",
+    "pyarrow>=17.0.0",
+    "urwid>=2.6.0",
+]
+
+[project.scripts]
+bucket-commander = "bc.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11.0",
+    "pytest>=8.3.0",
+    "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bc"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = [
+    ".uv-cache",
+    ".venv",
+    "src/bc/ui/progress.py",
+    "src/bc/ui/widget.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ARG",
+    "ASYNC",
+    "B",
+    "C4",
+    "E",
+    "F",
+    "I",
+    "N",
+    "PERF",
+    "PIE",
+    "PL",
+    "PTH",
+    "RET",
+    "RUF",
+    "SIM",
+    "T20",
+    "UP",
+    "W",
+]
+ignore = [
+    "PLR0913",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/bc/ui/widget.py" = ["ANN", "ARG002", "B007", "N802", "PLR0911", "PLR0912", "T201"]
+"src/bc/ui/progress.py" = ["ANN", "ARG002", "T201"]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+pretty = true
+files = [
+    "src/bc/__init__.py",
+    "src/bc/__main__.py",
+    "src/bc/cli.py",
+    "tests",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
