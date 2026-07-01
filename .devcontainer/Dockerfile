@@ -5,5 +5,5 @@ RUN curl -sSL https://sdk.cloud.google.com | bash -s -- --install-dir=/usr/local
     && echo 'export PATH=/usr/local/gcloud/google-cloud-sdk/bin:$PATH' >> /etc/bash.bashrc
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-    
+
 WORKDIR /workspace

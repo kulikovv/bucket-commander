@@ -1,5 +1,10 @@
+from pathlib import Path
+
 from bc import __version__
+from bc.app import AppConfig
 from bc.cli import build_parser, main
+
+RUNNER_EXIT_CODE = 23
 
 
 def test_package_exports_version() -> None:
@@ -7,13 +12,29 @@ def test_package_exports_version() -> None:
     assert __version__
 
 
-def test_cli_help_runs(capsys) -> None:  # type: ignore[no-untyped-def]
-    exit_code = main([])
+def test_cli_runs_app_with_default_paths() -> None:
+    captured_config: AppConfig | None = None
 
-    captured = capsys.readouterr()
+    def runner(config: AppConfig) -> int:
+        nonlocal captured_config
+        captured_config = config
+        return RUNNER_EXIT_CODE
 
-    assert exit_code == 0
-    assert "Two-panel terminal file manager" in captured.out
+    exit_code = main([], app_runner=runner)
+
+    assert exit_code == RUNNER_EXIT_CODE
+    assert captured_config == AppConfig(left=Path.cwd(), right=Path.cwd())
+
+
+def test_cli_accepts_initial_panel_paths(tmp_path: Path) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+
+    def runner(config: AppConfig) -> int:
+        assert config == AppConfig(left=left, right=right)
+        return 0
+
+    assert main(["--left", str(left), "--right", str(right)], app_runner=runner) == 0
 
 
 def test_cli_version_action(capsys) -> None:  # type: ignore[no-untyped-def]
@@ -27,4 +48,3 @@ def test_cli_version_action(capsys) -> None:  # type: ignore[no-untyped-def]
     captured = capsys.readouterr()
 
     assert "bucket-commander" in captured.out
-

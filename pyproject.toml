@@ -76,9 +76,12 @@ pretty = true
 files = [
     "src/bc/__init__.py",
     "src/bc/__main__.py",
+    "src/bc/app.py",
     "src/bc/cli.py",
     "src/bc/backends",
     "src/bc/core",
+    "src/bc/ui/commands.py",
+    "src/bc/ui/panels.py",
     "tests",
 ]
 
