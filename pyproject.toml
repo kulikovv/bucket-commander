@@ -77,6 +77,8 @@ files = [
     "src/bc/__init__.py",
     "src/bc/__main__.py",
     "src/bc/cli.py",
+    "src/bc/backends",
+    "src/bc/core",
     "tests",
 ]
 
