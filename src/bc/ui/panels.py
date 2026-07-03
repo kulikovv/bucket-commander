@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 
 import urwid
@@ -10,9 +11,29 @@ from bc.core import Entry, EntryType, PanelState
 from bc.ui.commands import PanelId, TwoPanelState
 
 SIZE_STEP = 1024.0
+COMMAND_FOOTER = " F3 View   F4 New File   F5 Copy   F6 Move   F7 New Folder   Q Quit "
+HELP_COMMANDS = (
+    ("F1 or ?", "Show this help"),
+    ("Tab", "Switch active panel"),
+    ("Up/Down", "Move cursor"),
+    ("Enter, Space, Right", "Open directory or prefix"),
+    ("Backspace, Left", "Go to parent"),
+    ("S", "Toggle selection"),
+    ("R or Ctrl-R", "Refresh active panel"),
+    ("F3", "View selected entry"),
+    ("F4", "Create a new file"),
+    ("F5", "Copy selected entries"),
+    ("F6", "Move selected entries"),
+    ("F7", "Create a new folder"),
+    ("Q", "Quit Bucket Commander"),
+)
 
 
-def render_app(state: TwoPanelState) -> urwid.Widget:
+def render_app(
+    state: TwoPanelState,
+    *,
+    on_help: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
     """Render the full two-panel application."""
 
     left = render_panel(state.left, title="Left", is_focused=state.focused is PanelId.LEFT)
@@ -24,11 +45,72 @@ def render_app(state: TwoPanelState) -> urwid.Widget:
         ],
         dividechars=1,
     )
-    footer = urwid.AttrMap(
-        urwid.Text(state.status_message, wrap="clip"),
-        "footer",
+    footer = urwid.Pile(
+        [
+            ("pack", _command_footer(on_help)),
+            ("pack", urwid.AttrMap(urwid.Text(state.status_message, wrap="clip"), "footer")),
+        ]
     )
     return urwid.Frame(body=body, footer=footer)
+
+
+def render_help_dialog(
+    *,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Render the modal help dialog."""
+
+    command_rows: list[urwid.Widget] = [
+        urwid.Columns(
+            [
+                ("given", 20, urwid.Text(keys)),
+                ("weight", 1, urwid.Text(description)),
+            ],
+            dividechars=2,
+        )
+        for keys, description in HELP_COMMANDS
+    ]
+    close_button = urwid.Button("Close", on_press=on_close)
+    content = urwid.Pile(
+        [
+            *command_rows,
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Padding(close_button, align="center", width=14)),
+        ]
+    )
+    return urwid.AttrMap(urwid.LineBox(content, title=" Commands "), "dialog")
+
+
+def render_help_overlay(
+    base: urwid.Widget,
+    *,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place the help dialog over the current application."""
+
+    dialog = render_help_dialog(on_close=on_close)
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 58),
+        valign="middle",
+        height="pack",
+    )
+
+
+def _command_footer(on_help: Callable[[urwid.Button], object] | None) -> urwid.Widget:
+    help_button = urwid.Button("Help", on_press=on_help)
+    return urwid.AttrMap(
+        urwid.Columns(
+            [
+                ("given", 10, help_button),
+                ("weight", 1, urwid.Text(COMMAND_FOOTER, wrap="clip")),
+            ],
+            dividechars=1,
+        ),
+        "footer_commands",
+    )
 
 
 def render_panel(panel: PanelState, *, title: str, is_focused: bool) -> urwid.Widget:

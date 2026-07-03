@@ -22,7 +22,15 @@ from bc.ui.commands import (
     switch_focus,
     toggle_selection,
 )
-from bc.ui.panels import render_app
+from bc.ui.panels import render_app, render_help_overlay
+
+PENDING_COMMAND_KEYS = {
+    "f3": "View",
+    "f4": "New file",
+    "f5": "Copy",
+    "f6": "Move",
+    "f7": "New folder",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,12 +51,13 @@ class BucketCommanderApp:
             right=PanelState(location=LocalLocation(config.right.resolve())),
         )
         self._loop: urwid.MainLoop | None = None
+        self._is_help_open = False
 
     def run(self) -> int:
         self._refresh_panel(PanelId.LEFT)
         self._refresh_panel(PanelId.RIGHT)
         self._loop = urwid.MainLoop(
-            render_app(self._state),
+            self._render(),
             palette=_palette(),
             unhandled_input=self._handle_key,
         )
@@ -58,8 +67,13 @@ class BucketCommanderApp:
     def _handle_key(self, key: str | tuple[str, int, int, int]) -> None:
         if not isinstance(key, str):
             return
+        if self._handle_help_key(key):
+            return
         if key in {"q", "Q", "esc"}:
             raise urwid.ExitMainLoop()
+        if key in {"f1", "?"}:
+            self._show_help_dialog()
+            return
         if key == "tab":
             self._update(switch_focus(self._state))
         elif key == "up":
@@ -74,9 +88,29 @@ class BucketCommanderApp:
             self._run_command(lambda: go_parent(self._state, self._backend))
         elif key in {"r", "R", "ctrl r"}:
             self._refresh_panel(self._state.focused)
+        elif key in PENDING_COMMAND_KEYS:
+            self._show_pending_command(PENDING_COMMAND_KEYS[key])
+
+    def _handle_help_key(self, key: str) -> bool:
+        if not self._is_help_open:
+            return False
+        if key in {"q", "Q", "esc", "enter", "f1", "?"}:
+            self._close_help_dialog()
+        return True
 
     def _refresh_panel(self, panel_id: PanelId) -> None:
         self._run_command(lambda: refresh(self._state, panel_id, self._backend))
+
+    def _show_pending_command(self, command_name: str) -> None:
+        self._update(self._state.with_status(f"{command_name} is not implemented yet"))
+
+    def _show_help_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._is_help_open = True
+        self._redraw()
+
+    def _close_help_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._is_help_open = False
+        self._redraw()
 
     def _run_command(self, command: Callable[[], Coroutine[Any, Any, TwoPanelState]]) -> None:
         try:
@@ -88,9 +122,18 @@ class BucketCommanderApp:
 
     def _update(self, state: TwoPanelState) -> None:
         self._state = state
+        self._redraw()
+
+    def _redraw(self) -> None:
         if self._loop is not None:
-            self._loop.widget = render_app(self._state)
+            self._loop.widget = self._render()
             self._loop.draw_screen()
+
+    def _render(self) -> urwid.Widget:
+        app = render_app(self._state, on_help=self._show_help_dialog)
+        if self._is_help_open:
+            return render_help_overlay(app, on_close=self._close_help_dialog)
+        return app
 
 
 def run_app(config: AppConfig) -> int:
@@ -106,6 +149,8 @@ def _palette() -> list[tuple[str, str, str]]:
         ("panel_border_focus", "yellow", "black"),
         ("panel_body", "light gray", "black"),
         ("entry_current", "black", "light cyan"),
+        ("footer_commands", "black", "light cyan"),
         ("footer", "black", "light gray"),
         ("error", "light red", "black"),
+        ("dialog", "light gray", "black"),
     ]
