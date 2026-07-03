@@ -17,7 +17,7 @@ def test_operation_entries_prefer_marked_entries_over_cursor(tmp_path: Path) -> 
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig(left=tmp_path, right=tmp_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(
@@ -58,7 +58,7 @@ def test_operation_entries_prefer_marked_entries_in_other_panel_over_cursor(
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig(left=tmp_path, right=tmp_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(
@@ -98,7 +98,7 @@ def test_copy_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig(left=tmp_path, right=destination_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=destination_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(
@@ -146,7 +146,7 @@ def test_move_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig(left=tmp_path, right=destination_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=destination_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(
@@ -192,7 +192,7 @@ def test_delete_task_uses_marked_entries_over_cursor_when_other_panel_is_focused
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig(left=tmp_path, right=tmp_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(

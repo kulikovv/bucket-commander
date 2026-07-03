@@ -8,6 +8,7 @@ from pathlib import Path
 
 from bc import __version__
 from bc.app import AppConfig, run_app
+from bc.core import parse_location
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,15 +23,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--left",
-        type=Path,
-        default=Path.cwd(),
-        help="Initial path for the left panel.",
+        default=str(Path.cwd()),
+        help="Initial location for the left panel, such as a path or s3://bucket/prefix/.",
     )
     parser.add_argument(
         "--right",
-        type=Path,
-        default=Path.cwd(),
-        help="Initial path for the right panel.",
+        default=str(Path.cwd()),
+        help="Initial location for the right panel, such as a path or s3://bucket/prefix/.",
     )
     parser.set_defaults(command="run")
     return parser
@@ -43,4 +42,4 @@ def main(
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return app_runner(AppConfig(left=args.left, right=args.right))
+    return app_runner(AppConfig(left=parse_location(args.left), right=parse_location(args.right)))

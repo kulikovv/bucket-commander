@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 import pytest
 
 from bc.backends import LocalBackend
-from bc.core import Entry, EntryType, PanelState, parse_location
+from bc.core import Entry, EntryType, Location, PanelState, parse_location
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -146,6 +146,27 @@ def test_go_parent_refreshes_active_panel(tmp_path: Path) -> None:
 
     assert parent.left.location == parse_location(tmp_path)
     assert "child" in [entry.name for entry in parent.left.entries]
+
+
+def test_go_parent_supports_s3_prefix_locations(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location("s3://example-bucket/logs/archive/")),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    parent = run_async(go_parent(state, StaticBackend(())))
+
+    assert parent.left.location == parse_location("s3://example-bucket/logs/")
+    assert [entry.name for entry in parent.left.entries] == [".."]
+
+
+class StaticBackend(LocalBackend):
+    def __init__(self, entries: tuple[Entry, ...]) -> None:
+        self._entries = entries
+
+    async def list(self, location: Location) -> tuple[Entry, ...]:
+        _ = location
+        return self._entries
 
 
 def run_async(coro: Coroutine[Any, Any, T]) -> T:

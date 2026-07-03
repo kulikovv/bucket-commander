@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from bc.backends import Backend
-from bc.core import Entry, EntryType, LocalLocation, PanelState
+from bc.core import Entry, EntryType, LocalLocation, PanelState, S3Location
 
 
 class PanelId(StrEnum):
@@ -99,7 +99,7 @@ async def enter(state: TwoPanelState, backend: Backend) -> TwoPanelState:
 async def go_parent(state: TwoPanelState, backend: Backend) -> TwoPanelState:
     panel = state.active
     location = panel.location
-    if not isinstance(location, LocalLocation):
+    if not isinstance(location, (LocalLocation, S3Location)):
         return state.with_status("Parent navigation is not available for this location")
     parent = location.parent()
     if parent is None:
@@ -109,10 +109,11 @@ async def go_parent(state: TwoPanelState, backend: Backend) -> TwoPanelState:
 
 
 def _with_parent_entry(location: object, entries: tuple[Entry, ...]) -> tuple[Entry, ...]:
-    if not isinstance(location, LocalLocation):
+    if not isinstance(location, (LocalLocation, S3Location)):
         return entries
     parent = location.parent()
     if parent is None:
         return entries
-    parent_entry = Entry(location=parent, name="..", entry_type=EntryType.DIRECTORY)
+    entry_type = EntryType.DIRECTORY if isinstance(parent, LocalLocation) else EntryType.PREFIX
+    parent_entry = Entry(location=parent, name="..", entry_type=entry_type)
     return (parent_entry, *entries)

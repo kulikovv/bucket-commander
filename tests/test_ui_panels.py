@@ -38,7 +38,7 @@ def test_render_help_overlay_lists_commands(tmp_path: Path) -> None:
 
 
 def test_help_keys_toggle_modal_without_running_loop(tmp_path: Path) -> None:
-    app = BucketCommanderApp(AppConfig(left=tmp_path, right=tmp_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
 
     app._handle_key("?")
     assert app._is_help_open

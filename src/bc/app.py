@@ -10,7 +10,7 @@ from typing import Any
 
 import urwid
 
-from bc.backends import BackendError, LocalBackend
+from bc.backends import BackendError, BackendRouter, LocalBackend, S3Backend
 from bc.core import (
     Entry,
     LocalLocation,
@@ -21,7 +21,7 @@ from bc.core import (
     TaskState,
     TaskType,
 )
-from bc.core.locations import Location
+from bc.core.locations import Location, parse_location
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -46,18 +46,22 @@ TASK_POLL_SECONDS = 0.1
 class AppConfig:
     """Startup configuration for the terminal application."""
 
-    left: Path
-    right: Path
+    left: Location
+    right: Location
+
+    @classmethod
+    def from_paths(cls, *, left: Path, right: Path) -> AppConfig:
+        return cls(left=parse_location(left), right=parse_location(right))
 
 
 class BucketCommanderApp:
     """Minimal two-panel local file manager."""
 
     def __init__(self, config: AppConfig) -> None:
-        self._backend = LocalBackend()
+        self._backend = BackendRouter((LocalBackend(), S3Backend()))
         self._state = TwoPanelState(
-            left=PanelState(location=LocalLocation(config.left.resolve())),
-            right=PanelState(location=LocalLocation(config.right.resolve())),
+            left=PanelState(location=config.left),
+            right=PanelState(location=config.right),
         )
         self._loop: urwid.MainLoop | None = None
         self._is_help_open = False
