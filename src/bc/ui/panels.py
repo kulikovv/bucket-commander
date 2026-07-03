@@ -4,14 +4,29 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from enum import StrEnum
 
 import urwid
 
 from bc.core import Entry, EntryType, PanelState
+from bc.core.task_manager import TaskRecord, TaskState
 from bc.ui.commands import PanelId, TwoPanelState
 
 SIZE_STEP = 1024.0
-COMMAND_FOOTER = " F3 View   F4 New File   F5 Copy   F6 Move   F7 New Folder   Q Quit "
+TASK_DETAIL_MAX = 52
+TASK_DETAIL_SUFFIX = 49
+COMMAND_BUTTON_WIDTH = 14
+COMMAND_BUTTONS = (
+    ("Help", "help"),
+    ("View", "view"),
+    ("New File", "new_file"),
+    ("Copy", "copy"),
+    ("Move", "move"),
+    ("New Folder", "new_folder"),
+    ("Delete", "delete"),
+    ("Cancel", "cancel"),
+    ("Quit", "quit"),
+)
 HELP_COMMANDS = (
     ("F1 or ?", "Show this help"),
     ("Tab", "Switch active panel"),
@@ -25,14 +40,34 @@ HELP_COMMANDS = (
     ("F5", "Copy selected entries"),
     ("F6", "Move selected entries"),
     ("F7", "Create a new folder"),
+    ("F8 or Delete", "Delete selected entries"),
+    ("C", "Cancel active task"),
     ("Q", "Quit Bucket Commander"),
 )
+
+
+class UiCommand(StrEnum):
+    """Commands exposed by clickable footer buttons."""
+
+    HELP = "help"
+    VIEW = "view"
+    NEW_FILE = "new_file"
+    SELECT = "select"
+    REFRESH = "refresh"
+    COPY = "copy"
+    MOVE = "move"
+    NEW_FOLDER = "new_folder"
+    DELETE = "delete"
+    CANCEL = "cancel"
+    QUIT = "quit"
 
 
 def render_app(
     state: TwoPanelState,
     *,
+    tasks: tuple[TaskRecord, ...] = (),
     on_help: Callable[[urwid.Button], object] | None = None,
+    on_command: Callable[[UiCommand], object] | None = None,
 ) -> urwid.Widget:
     """Render the full two-panel application."""
 
@@ -47,7 +82,8 @@ def render_app(
     )
     footer = urwid.Pile(
         [
-            ("pack", _command_footer(on_help)),
+            ("pack", _command_footer(on_help, on_command)),
+            ("pack", _task_footer(tasks)),
             ("pack", urwid.AttrMap(urwid.Text(state.status_message, wrap="clip"), "footer")),
         ]
     )
@@ -99,18 +135,111 @@ def render_help_overlay(
     )
 
 
-def _command_footer(on_help: Callable[[urwid.Button], object] | None) -> urwid.Widget:
-    help_button = urwid.Button("Help", on_press=on_help)
+def _command_footer(
+    on_help: Callable[[urwid.Button], object] | None,
+    on_command: Callable[[UiCommand], object] | None,
+) -> urwid.Widget:
+    buttons = [
+        _command_button(label, UiCommand(command), on_help=on_help, on_command=on_command)
+        for label, command in COMMAND_BUTTONS
+    ]
     return urwid.AttrMap(
-        urwid.Columns(
-            [
-                ("given", 10, help_button),
-                ("weight", 1, urwid.Text(COMMAND_FOOTER, wrap="clip")),
-            ],
-            dividechars=1,
+        urwid.GridFlow(
+            buttons,
+            cell_width=COMMAND_BUTTON_WIDTH,
+            h_sep=1,
+            v_sep=0,
+            align="left",
         ),
         "footer_commands",
     )
+
+
+def _command_button(
+    label: str,
+    command: UiCommand,
+    *,
+    on_help: Callable[[urwid.Button], object] | None,
+    on_command: Callable[[UiCommand], object] | None,
+) -> urwid.Button:
+    if command is UiCommand.HELP and on_command is None:
+        return urwid.Button(label, on_press=on_help)
+    return urwid.Button(label, on_press=_emit_command, user_data=(command, on_command))
+
+
+def _emit_command(
+    _button: urwid.Button,
+    user_data: tuple[UiCommand, Callable[[UiCommand], object] | None],
+) -> None:
+    command, on_command = user_data
+    if on_command is not None:
+        on_command(command)
+
+
+def _task_footer(tasks: tuple[TaskRecord, ...]) -> urwid.Widget:
+    task = _visible_task(tasks)
+    if task is None:
+        return urwid.AttrMap(urwid.Text(" No active tasks", wrap="clip"), "task_footer")
+    progress = task.progress
+    percent = _progress_percent(task)
+    detail = progress.current_item
+    if len(detail) > TASK_DETAIL_MAX:
+        detail = f"...{detail[-TASK_DETAIL_SUFFIX:]}"
+    parts = [
+        f" {task.task_type.value.title()}",
+        task.status.value,
+        percent,
+        f"{progress.items_done}/{progress.items_total} items",
+        f"{_format_bytes(progress.bytes_done)}/{_format_bytes(progress.bytes_total)}",
+    ]
+    if progress.message:
+        parts.append(progress.message)
+    if task.latest_error:
+        parts.append(task.latest_error)
+    if detail:
+        parts.append(detail)
+    return urwid.AttrMap(urwid.Text(" | ".join(parts), wrap="clip"), _task_footer_attr(task))
+
+
+def _visible_task(tasks: tuple[TaskRecord, ...]) -> TaskRecord | None:
+    for task in reversed(tasks):
+        if not task.status.is_terminal:
+            return task
+    if tasks:
+        return tasks[-1]
+    return None
+
+
+def _task_footer_attr(task: TaskRecord) -> str:
+    if task.status is TaskState.FAILED:
+        return "error"
+    return "task_footer"
+
+
+def _progress_percent(task: TaskRecord) -> str:
+    progress = task.progress
+    if progress.bytes_total:
+        value = progress.bytes_done / progress.bytes_total
+    elif progress.items_total:
+        value = progress.items_done / progress.items_total
+    elif task.status is TaskState.COMPLETED:
+        value = 1
+    else:
+        return "--%"
+    return f"{min(100, int(value * 100)):>3}%"
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "K", "M", "G", "T")
+    size = float(value)
+    unit = units[0]
+    for unit in units:
+        if size < SIZE_STEP or unit == units[-1]:
+            break
+        size /= SIZE_STEP
+    if unit == units[0]:
+        return f"{int(size)}{unit}"
+    return f"{size:.1f}{unit}"
 
 
 def render_panel(panel: PanelState, *, title: str, is_focused: bool) -> urwid.Widget:

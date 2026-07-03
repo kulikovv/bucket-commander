@@ -13,8 +13,10 @@ from typing import TypeVar
 
 from bc.backends.base import Backend, BackendError, BackendErrorKind
 from bc.core import Entry, EntryType, LocalLocation, Location, OperationResult
+from bc.core.task_manager import ProgressSink
 
 T = TypeVar("T")
+COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class LocalBackend(Backend):
@@ -37,10 +39,16 @@ class LocalBackend(Backend):
         local = self._require_local(location)
         return await self._run(lambda: self._mkdir_sync(local, parents=parents))
 
-    async def copy(self, source: Location, destination: Location) -> OperationResult:
+    async def copy(
+        self,
+        source: Location,
+        destination: Location,
+        *,
+        progress: ProgressSink | None = None,
+    ) -> OperationResult:
         source_local = self._require_local(source)
         destination_local = self._require_local(destination)
-        return await self._run(lambda: self._copy_sync(source_local, destination_local))
+        return await self._run(lambda: self._copy_sync(source_local, destination_local, progress))
 
     async def move(self, source: Location, destination: Location) -> OperationResult:
         source_local = self._require_local(source)
@@ -55,9 +63,17 @@ class LocalBackend(Backend):
         destination = LocalLocation(source_local.path.with_name(new_name))
         return await self.move(source_local, destination)
 
-    async def delete(self, location: Location, *, recursive: bool = False) -> OperationResult:
+    async def delete(
+        self,
+        location: Location,
+        *,
+        recursive: bool = False,
+        progress: ProgressSink | None = None,
+    ) -> OperationResult:
         local = self._require_local(location)
-        return await self._run(lambda: self._delete_sync(local, recursive=recursive))
+        return await self._run(
+            lambda: self._delete_sync(local, recursive=recursive, progress=progress)
+        )
 
     def _require_local(self, location: Location) -> LocalLocation:
         if isinstance(location, LocalLocation):
@@ -105,16 +121,28 @@ class LocalBackend(Backend):
             entries_affected=1,
         )
 
-    def _copy_sync(self, source: LocalLocation, destination: LocalLocation) -> OperationResult:
+    def _copy_sync(
+        self,
+        source: LocalLocation,
+        destination: LocalLocation,
+        progress: ProgressSink | None,
+    ) -> OperationResult:
         if not source.path.exists():
             raise _backend_error(FileNotFoundError(errno.ENOENT, "No such file", source.path))
         target = _resolve_target(source.path, destination.path)
         entries, bytes_total = _tree_totals(source.path)
+        _progress_update(
+            progress,
+            items_total=entries,
+            bytes_total=bytes_total,
+            current_item=str(source.path),
+            message=f"Copying {source.path.name}",
+        )
         if source.path.is_dir() and not source.path.is_symlink():
-            shutil.copytree(source.path, target, dirs_exist_ok=True)
+            self._copy_directory_sync(source.path, target, progress)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source.path, target)
+            self._copy_file_sync(source.path, target, progress)
         return OperationResult.success(
             f"Copied {source.path} to {target}",
             source=source,
@@ -138,10 +166,23 @@ class LocalBackend(Backend):
             bytes_affected=bytes_total,
         )
 
-    def _delete_sync(self, location: LocalLocation, *, recursive: bool) -> OperationResult:
+    def _delete_sync(
+        self,
+        location: LocalLocation,
+        *,
+        recursive: bool,
+        progress: ProgressSink | None,
+    ) -> OperationResult:
         if not location.path.exists() and not location.path.is_symlink():
             raise _backend_error(FileNotFoundError(errno.ENOENT, "No such file", location.path))
         entries, bytes_total = _tree_totals(location.path)
+        _progress_update(
+            progress,
+            items_total=entries,
+            bytes_total=bytes_total,
+            current_item=str(location.path),
+            message=f"Deleting {location.path.name}",
+        )
         if location.path.is_dir() and not location.path.is_symlink():
             if not recursive:
                 raise BackendError(
@@ -149,15 +190,71 @@ class LocalBackend(Backend):
                     f"Directory delete requires recursive=True: {location.path}",
                     location=location,
                 )
-            shutil.rmtree(location.path)
+            self._delete_directory_sync(location.path, progress)
         else:
+            _progress_update(progress, current_item=str(location.path))
             location.path.unlink()
+            _progress_advance(progress, items=1, bytes_count=bytes_total)
         return OperationResult.success(
             f"Deleted {location.path}",
             source=location,
             entries_affected=entries,
             bytes_affected=bytes_total,
         )
+
+    def _copy_directory_sync(
+        self,
+        source: Path,
+        target: Path,
+        progress: ProgressSink | None,
+    ) -> None:
+        _progress_update(progress, current_item=str(source))
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copystat(source, target, follow_symlinks=False)
+        _progress_advance(progress, items=1)
+        for path in _tree_children(source):
+            relative = path.relative_to(source)
+            target_path = target / relative
+            if path.is_dir() and not path.is_symlink():
+                _progress_update(progress, current_item=str(path))
+                target_path.mkdir(parents=True, exist_ok=True)
+                shutil.copystat(path, target_path, follow_symlinks=False)
+                _progress_advance(progress, items=1)
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                self._copy_file_sync(path, target_path, progress)
+
+    def _copy_file_sync(
+        self,
+        source: Path,
+        target: Path,
+        progress: ProgressSink | None,
+    ) -> None:
+        _progress_update(progress, current_item=str(source))
+        if source.is_symlink():
+            shutil.copy2(source, target)
+            _progress_advance(progress, items=1, bytes_count=source.lstat().st_size)
+            return
+        with source.open("rb") as source_file, target.open("wb") as target_file:
+            while chunk := source_file.read(COPY_CHUNK_SIZE):
+                _progress_raise_if_cancelled(progress)
+                target_file.write(chunk)
+                _progress_advance(progress, bytes_count=len(chunk))
+        shutil.copystat(source, target)
+        _progress_advance(progress, items=1)
+
+    def _delete_directory_sync(self, path: Path, progress: ProgressSink | None) -> None:
+        for child in sorted(_tree_children(path), key=lambda item: len(item.parts), reverse=True):
+            _progress_update(progress, current_item=str(child))
+            bytes_count = child.lstat().st_size if child.is_file() or child.is_symlink() else 0
+            if child.is_dir() and not child.is_symlink():
+                child.rmdir()
+            else:
+                child.unlink()
+            _progress_advance(progress, items=1, bytes_count=bytes_count)
+        _progress_update(progress, current_item=str(path))
+        path.rmdir()
+        _progress_advance(progress, items=1)
 
 
 def _entry_type(path: Path) -> EntryType:
@@ -181,6 +278,48 @@ def _tree_totals(path: Path) -> tuple[int, int]:
         return entries, bytes_total
     size = path.lstat().st_size if path.exists() or path.is_symlink() else 0
     return 1, size
+
+
+def _tree_children(path: Path) -> tuple[Path, ...]:
+    return tuple(sorted(path.rglob("*"), key=lambda child: child.as_posix().casefold()))
+
+
+def _progress_update(
+    progress: ProgressSink | None,
+    *,
+    items_total: int | None = None,
+    items_done: int | None = None,
+    bytes_total: int | None = None,
+    bytes_done: int | None = None,
+    current_item: str | None = None,
+    message: str | None = None,
+) -> None:
+    if progress is None:
+        return
+    progress.update(
+        items_total=items_total,
+        items_done=items_done,
+        bytes_total=bytes_total,
+        bytes_done=bytes_done,
+        current_item=current_item,
+        message=message,
+    )
+
+
+def _progress_advance(
+    progress: ProgressSink | None,
+    *,
+    items: int = 0,
+    bytes_count: int = 0,
+) -> None:
+    if progress is None:
+        return
+    progress.advance(items=items, bytes_count=bytes_count)
+
+
+def _progress_raise_if_cancelled(progress: ProgressSink | None) -> None:
+    if progress is not None:
+        progress.raise_if_cancelled()
 
 
 def _resolve_target(source: Path, destination: Path) -> Path:

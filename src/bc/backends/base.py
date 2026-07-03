@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from enum import StrEnum
 
 from bc.core import Entry, Location, OperationResult
+from bc.core.task_manager import ProgressSink
 
 
 class BackendErrorKind(StrEnum):
@@ -60,7 +61,13 @@ class Backend(ABC):
         """Create a directory or prefix."""
 
     @abstractmethod
-    async def copy(self, source: Location, destination: Location) -> OperationResult:
+    async def copy(
+        self,
+        source: Location,
+        destination: Location,
+        *,
+        progress: ProgressSink | None = None,
+    ) -> OperationResult:
         """Copy source to destination."""
 
     @abstractmethod
@@ -72,5 +79,11 @@ class Backend(ABC):
         """Rename source inside its current parent."""
 
     @abstractmethod
-    async def delete(self, location: Location, *, recursive: bool = False) -> OperationResult:
+    async def delete(
+        self,
+        location: Location,
+        *,
+        recursive: bool = False,
+        progress: ProgressSink | None = None,
+    ) -> OperationResult:
         """Delete a file, object, directory, or prefix."""

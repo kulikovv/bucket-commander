@@ -17,7 +17,10 @@ def test_render_app_includes_help_button(tmp_path: Path) -> None:
     rendered = render_text(render_app(state))
 
     assert "< Help" in rendered
-    assert "F3 View" in rendered
+    assert "< View" in rendered
+    assert "< Copy" in rendered
+    assert "< Move" in rendered
+    assert "< Delete" in rendered
 
 
 def test_render_help_overlay_lists_commands(tmp_path: Path) -> None:
