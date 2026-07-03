@@ -80,6 +80,7 @@ files = [
     "src/bc/cli.py",
     "src/bc/backends",
     "src/bc/core",
+    "src/bc/index",
     "src/bc/ui/commands.py",
     "src/bc/ui/panels.py",
     "tests",
