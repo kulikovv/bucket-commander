@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import urwid
 
-from bc.backends import BackendError, BackendRouter, LocalBackend, S3Backend
+from bc.backends import BackendError, BackendRouter, LocalBackend, S3Backend, TransferBackend
+from bc.config import KnownSource, SourcesConfig
 from bc.core import (
     Entry,
     LocalLocation,
@@ -32,7 +33,7 @@ from bc.ui.commands import (
     switch_focus,
     toggle_selection,
 )
-from bc.ui.panels import UiCommand, render_app, render_help_overlay
+from bc.ui.panels import UiCommand, render_app, render_help_overlay, render_location_picker_overlay
 
 PENDING_COMMAND_KEYS = {
     "f3": "View",
@@ -48,6 +49,7 @@ class AppConfig:
 
     left: Location
     right: Location
+    sources: SourcesConfig = field(default_factory=SourcesConfig)
 
     @classmethod
     def from_paths(cls, *, left: Path, right: Path) -> AppConfig:
@@ -58,13 +60,18 @@ class BucketCommanderApp:
     """Minimal two-panel local file manager."""
 
     def __init__(self, config: AppConfig) -> None:
-        self._backend = BackendRouter((LocalBackend(), S3Backend()))
+        s3_backend = S3Backend()
+        self._backend = BackendRouter(
+            (LocalBackend(), s3_backend, TransferBackend(s3_backend=s3_backend))
+        )
         self._state = TwoPanelState(
             left=PanelState(location=config.left),
             right=PanelState(location=config.right),
         )
         self._loop: urwid.MainLoop | None = None
         self._is_help_open = False
+        self._location_picker_panel: PanelId | None = None
+        self._sources = config.sources.sources
         self._tasks = TaskManager()
         self._task_poll_scheduled = False
         self._handled_terminal_tasks: set[str] = set()
@@ -87,6 +94,8 @@ class BucketCommanderApp:
         if not isinstance(key, str):
             return
         if self._handle_help_key(key):
+            return
+        if self._handle_location_picker_key(key):
             return
         if key in {"q", "Q", "esc"}:
             raise urwid.ExitMainLoop()
@@ -124,6 +133,13 @@ class BucketCommanderApp:
             return False
         if key in {"q", "Q", "esc", "enter", "f1", "?"}:
             self._close_help_dialog()
+        return True
+
+    def _handle_location_picker_key(self, key: str) -> bool:
+        if self._location_picker_panel is None:
+            return False
+        if key in {"q", "Q", "esc"}:
+            self._close_location_picker()
         return True
 
     def _handle_task_key(self, key: str) -> bool:
@@ -177,6 +193,22 @@ class BucketCommanderApp:
         self._is_help_open = False
         self._redraw()
 
+    def _show_location_picker(self, panel_id: PanelId) -> None:
+        self._location_picker_panel = panel_id
+        self._redraw()
+
+    def _close_location_picker(self, _button: urwid.Button | None = None) -> None:
+        self._location_picker_panel = None
+        self._redraw()
+
+    def _select_location_source(self, source: KnownSource) -> None:
+        panel_id = self._location_picker_panel
+        if panel_id is None:
+            return
+        self._location_picker_panel = None
+        self._state = self._state.with_panel(panel_id, PanelState(location=source.location))
+        self._refresh_panel(panel_id)
+
     def _start_copy_tasks(self) -> None:
         source_panel = self._operation_source_panel()
         entries = self._operation_entries(source_panel)
@@ -184,12 +216,9 @@ class BucketCommanderApp:
         if not entries:
             self._update(self._state.with_status("No entry selected"))
             return
-        if not isinstance(destination, LocalLocation):
-            self._update(self._state.with_status("Copy destination must be local"))
-            return
         started = 0
         for entry in entries:
-            if not isinstance(entry.location, LocalLocation) or entry.name == "..":
+            if entry.name == "..":
                 continue
 
             async def copy_task(
@@ -215,12 +244,9 @@ class BucketCommanderApp:
         if not entries:
             self._update(self._state.with_status("No entry selected"))
             return
-        if not isinstance(destination, LocalLocation):
-            self._update(self._state.with_status("Move destination must be local"))
-            return
         started = 0
         for entry in entries:
-            if not isinstance(entry.location, LocalLocation) or entry.name == "..":
+            if entry.name == "..":
                 continue
 
             async def move_task(
@@ -314,12 +340,22 @@ class BucketCommanderApp:
     def _render(self) -> urwid.Widget:
         app = render_app(
             self._state,
+            sources=self._sources,
             tasks=self._tasks.records(),
             on_help=self._show_help_dialog,
             on_command=self._handle_ui_command,
+            on_location_picker=self._show_location_picker,
         )
         if self._is_help_open:
             return render_help_overlay(app, on_close=self._close_help_dialog)
+        if self._location_picker_panel is not None:
+            return render_location_picker_overlay(
+                app,
+                self._sources,
+                self._location_picker_panel,
+                on_select=self._select_location_source,
+                on_close=self._close_location_picker,
+            )
         return app
 
     def _schedule_task_poll(self) -> None:

@@ -1,0 +1,22 @@
+# Copy this to ~/.config/bucket-commander/sources.toml and edit the non-secret fields.
+# Do not store access keys, secret keys, session tokens, or passwords here.
+# Credentials are resolved by the AWS SDK through profiles, environment variables,
+# SSO, web identity, or instance/container roles.
+
+[[sources]]
+name = "AWS logs"
+uri = "s3://example-logs/prod/"
+profile = "work-readonly"
+region = "us-east-1"
+credential_source = "aws-profile"
+
+[[sources]]
+name = "Local MinIO"
+uri = "s3://bucket-commander/logs/"
+region = "us-east-1"
+endpoint_url = "http://127.0.0.1:9000"
+credential_source = "environment"
+
+[[sources]]
+name = "Home"
+uri = "~/"

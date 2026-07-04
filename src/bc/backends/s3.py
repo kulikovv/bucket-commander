@@ -6,7 +6,7 @@ import importlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, SupportsInt, cast
+from typing import BinaryIO, Protocol, SupportsInt, cast
 
 from bc.backends.base import Backend, BackendError, BackendErrorKind
 from bc.core import Entry, EntryType, Location, OperationResult, S3Location
@@ -21,6 +21,15 @@ class S3Client(Protocol):
 
     async def head_object(self, **kwargs: object) -> Mapping[str, object]:
         """Return one `HeadObject` response."""
+
+    async def delete_object(self, **kwargs: object) -> Mapping[str, object]:
+        """Delete one object."""
+
+    async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
+        """Upload one file-like object."""
+
+    async def download_fileobj(self, bucket: str, key: str, fileobj: BinaryIO) -> None:
+        """Download one object into a file-like object."""
 
 
 class S3ClientContext(Protocol):
@@ -140,14 +149,23 @@ class S3Backend(Backend):
         recursive: bool = False,
         progress: ProgressSink | None = None,
     ) -> OperationResult:
-        _ = recursive, progress
-        raise _unsupported("S3 delete is not implemented yet", location)
+        s3_location = self._require_s3(location)
+        if not s3_location.prefix:
+            raise _unsupported("S3 bucket deletion is not supported", location)
+        try:
+            if recursive:
+                return await self._delete_prefix(s3_location, progress)
+            return await self._delete_object(s3_location, progress)
+        except BackendError:
+            raise
+        except Exception as error:
+            raise _backend_error(error, location=s3_location) from error
 
     def _client(self, location: S3Location) -> S3ClientContext:
         return self._client_factory(
             profile_name=location.profile or self._config.profile_name,
             region_name=location.region or self._config.region_name,
-            endpoint_url=self._config.endpoint_url,
+            endpoint_url=location.endpoint_url or self._config.endpoint_url,
         )
 
     async def _list_page(
@@ -170,6 +188,72 @@ class S3Backend(Backend):
             return location
         msg = f"S3 backend does not support {location.provider!r} locations"
         raise BackendError(BackendErrorKind.INVALID_LOCATION, msg, location=location)
+
+    async def _delete_object(
+        self,
+        location: S3Location,
+        progress: ProgressSink | None,
+    ) -> OperationResult:
+        key = location.prefix.rstrip("/")
+        _progress_update(
+            progress,
+            items_total=1,
+            current_item=location.uri,
+            message=f"Deleting {location.name}",
+        )
+        async with self._client(location) as client:
+            await client.delete_object(Bucket=location.bucket, Key=key)
+        _progress_advance(progress, items=1)
+        return OperationResult.success(
+            f"Deleted {location.uri}",
+            source=location,
+            entries_affected=1,
+        )
+
+    async def _delete_prefix(
+        self,
+        location: S3Location,
+        progress: ProgressSink | None,
+    ) -> OperationResult:
+        keys = await self._list_object_keys(location)
+        _progress_update(
+            progress,
+            items_total=len(keys),
+            current_item=location.uri,
+            message=f"Deleting {location.name}",
+        )
+        async with self._client(location) as client:
+            for key in keys:
+                _progress_raise_if_cancelled(progress)
+                _progress_update(progress, current_item=f"s3://{location.bucket}/{key}")
+                await client.delete_object(Bucket=location.bucket, Key=key)
+                _progress_advance(progress, items=1)
+        return OperationResult.success(
+            f"Deleted {location.uri}",
+            source=location,
+            entries_affected=len(keys),
+        )
+
+    async def _list_object_keys(self, location: S3Location) -> tuple[str, ...]:
+        keys: list[str] = []
+        async with self._client(location) as client:
+            token: str | None = None
+            while True:
+                request: dict[str, object] = {
+                    "Bucket": location.bucket,
+                    "Prefix": location.prefix,
+                }
+                if token is not None:
+                    request["ContinuationToken"] = token
+                page = await client.list_objects_v2(**request)
+                for item in _sequence_of_mappings(page.get("Contents")):
+                    key = _optional_str(item.get("Key"))
+                    if key is not None:
+                        keys.append(key)
+                token = _optional_str(page.get("NextContinuationToken"))
+                if not page.get("IsTruncated") or token is None:
+                    break
+        return tuple(keys)
 
 
 def _default_client_factory(
@@ -204,6 +288,7 @@ def _prefix_entries(location: S3Location, page: Mapping[str, object]) -> tuple[E
                     prefix=prefix,
                     profile=location.profile,
                     region=location.region,
+                    endpoint_url=location.endpoint_url,
                 ),
                 name=_prefix_name(prefix, location.prefix),
                 entry_type=EntryType.PREFIX,
@@ -230,6 +315,7 @@ def _object_entries(location: S3Location, page: Mapping[str, object]) -> tuple[E
                     prefix=key,
                     profile=location.profile,
                     region=location.region,
+                    endpoint_url=location.endpoint_url,
                 ),
                 name=name,
                 entry_type=EntryType.OBJECT,
@@ -260,6 +346,7 @@ def _object_entry_from_head(
             prefix=object_key,
             profile=location.profile,
             region=location.region,
+            endpoint_url=location.endpoint_url,
         ),
         name=object_key.rsplit("/", maxsplit=1)[-1],
         entry_type=EntryType.OBJECT,
@@ -348,3 +435,24 @@ def _unsupported(
         location=location,
         destination=destination,
     )
+
+
+def _progress_update(
+    progress: ProgressSink | None,
+    *,
+    items_total: int | None = None,
+    current_item: str | None = None,
+    message: str | None = None,
+) -> None:
+    if progress is not None:
+        progress.update(items_total=items_total, current_item=current_item, message=message)
+
+
+def _progress_advance(progress: ProgressSink | None, *, items: int = 0) -> None:
+    if progress is not None:
+        progress.advance(items=items)
+
+
+def _progress_raise_if_cancelled(progress: ProgressSink | None) -> None:
+    if progress is not None:
+        progress.raise_if_cancelled()

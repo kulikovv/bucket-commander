@@ -6,6 +6,8 @@ These instructions apply to the whole repository. Follow them when implementing 
 
 Bucket Commander is a Python terminal application with a two-panel file manager interface for local files and object-storage buckets. It should support responsive local browsing, async bucket exploration, Parquet-backed bucket metadata indexes, and durable batch jobs for large operations such as copy, move, delete, and recursive indexing.
 
+Known locations are configured through TOML source files. These files may store non-secret routing metadata such as local paths, S3 URIs, regions, endpoints, and AWS profile names, but they must not store access keys, secret keys, session tokens, passwords, or other credentials. S3 credentials should be resolved by the AWS SDK through profiles, SSO, environment variables, web identity, or instance/container roles.
+
 Primary design references:
 
 - `SPECIFICATION.md`
@@ -85,6 +87,7 @@ When code and documentation disagree, preserve working behavior and update the d
   - `config/` owns settings and profiles.
 - Do not let UI code directly call cloud SDKs or parse provider-specific responses.
 - Do not let backend code depend on UI widgets.
+- Keep local/S3 transfer behavior in backend or operation layers. UI code should select locations and start operations, not implement upload/download logic.
 - Treat object-storage prefixes as logical views, not real directories.
 - Use immutable, append-only Parquet update semantics:
   - write new batch files
@@ -93,6 +96,7 @@ When code and documentation disagree, preserve working behavior and update the d
   - represent deletion/staleness explicitly
 - Use SQLite or another transactional store for frequently changing durable job state. Do not use Parquet for high-frequency job-status updates.
 - Large operations should be planned before execution. A move should be modeled as copy, verify, then delete source.
+- Cross-provider copy and move should support local-to-S3 and S3-to-local flows. Preserve provider metadata on locations so selected S3-compatible endpoints, regions, and profiles continue to work while navigating prefixes.
 - Design for resume and retry from the beginning for bucket indexing and batch jobs.
 - Keep provider-specific capabilities optional. For example, server-side copy should be used when available but not required by the common operation model.
 
@@ -144,4 +148,3 @@ Before handing off a change, check:
 - Are Parquet files treated as immutable batch outputs?
 - Are destructive operations explicit and recoverable where practical?
 - Are tests added at the right level?
-

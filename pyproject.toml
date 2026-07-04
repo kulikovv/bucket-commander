@@ -90,3 +90,6 @@ files = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "integration: tests that require external services such as MinIO",
+]

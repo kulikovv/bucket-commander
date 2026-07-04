@@ -62,6 +62,7 @@ class S3Location:
     prefix: str = ""
     profile: str | None = None
     region: str | None = None
+    endpoint_url: str | None = None
 
     provider: ClassVar[str] = "s3"
 
@@ -106,6 +107,7 @@ class S3Location:
             prefix=parent_prefix,
             profile=self.profile,
             region=self.region,
+            endpoint_url=self.endpoint_url,
         )
 
     def child(self, name: str) -> S3Location:
@@ -117,6 +119,7 @@ class S3Location:
             prefix=f"{self.prefix}{name}/",
             profile=self.profile,
             region=self.region,
+            endpoint_url=self.endpoint_url,
         )
 
     def __str__(self) -> str:

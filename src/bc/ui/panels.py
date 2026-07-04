@@ -8,6 +8,7 @@ from enum import StrEnum
 
 import urwid
 
+from bc.config import KnownSource
 from bc.core import Entry, EntryType, PanelState
 from bc.core.task_manager import TaskRecord, TaskState
 from bc.ui.commands import PanelId, TwoPanelState
@@ -65,9 +66,11 @@ class UiCommand(StrEnum):
 def render_app(
     state: TwoPanelState,
     *,
+    sources: tuple[KnownSource, ...] = (),
     tasks: tuple[TaskRecord, ...] = (),
     on_help: Callable[[urwid.Button], object] | None = None,
     on_command: Callable[[UiCommand], object] | None = None,
+    on_location_picker: Callable[[PanelId], object] | None = None,
 ) -> urwid.Widget:
     """Render the full two-panel application."""
 
@@ -87,7 +90,11 @@ def render_app(
             ("pack", urwid.AttrMap(urwid.Text(state.status_message, wrap="clip"), "footer")),
         ]
     )
-    return urwid.Frame(body=body, footer=footer)
+    return urwid.Frame(
+        body=body,
+        header=_location_header(sources, on_location_picker),
+        footer=footer,
+    )
 
 
 def render_help_dialog(
@@ -133,6 +140,92 @@ def render_help_overlay(
         valign="middle",
         height="pack",
     )
+
+
+def render_location_picker_overlay(
+    base: urwid.Widget,
+    sources: tuple[KnownSource, ...],
+    target_panel: PanelId,
+    *,
+    on_select: Callable[[KnownSource], object] | None = None,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place a known-location picker over the current application."""
+
+    rows: list[urwid.Widget]
+    if sources:
+        rows = [
+            urwid.Button(source.label, on_press=_emit_source, user_data=(source, on_select))
+            for source in sources
+        ]
+    else:
+        rows = [urwid.Text("No known locations configured.")]
+    close_button = urwid.Button("Close", on_press=on_close)
+    content = urwid.Pile(
+        [
+            *rows,
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Padding(close_button, align="center", width=14)),
+        ]
+    )
+    dialog = urwid.AttrMap(
+        urwid.LineBox(content, title=f" {target_panel.value.title()} Locations "),
+        "dialog",
+    )
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 72),
+        valign="middle",
+        height="pack",
+    )
+
+
+def _location_header(
+    sources: tuple[KnownSource, ...],
+    on_location_picker: Callable[[PanelId], object] | None,
+) -> urwid.Widget:
+    left_button = urwid.Button(
+        "Left",
+        on_press=_emit_location_picker,
+        user_data=(PanelId.LEFT, on_location_picker),
+    )
+    right_button = urwid.Button(
+        "Right",
+        on_press=_emit_location_picker,
+        user_data=(PanelId.RIGHT, on_location_picker),
+    )
+    return urwid.AttrMap(
+        urwid.Columns(
+            [
+                ("pack", urwid.Text(" Locations ")),
+                ("given", 12, left_button),
+                ("given", 12, right_button),
+                ("weight", 1, urwid.Text(f" {len(sources)} known location(s)", wrap="clip")),
+            ],
+            dividechars=1,
+        ),
+        "footer_commands",
+    )
+
+
+def _emit_location_picker(
+    _button: urwid.Button,
+    user_data: tuple[PanelId, Callable[[PanelId], object] | None],
+) -> None:
+    panel_id, on_location_picker = user_data
+    if on_location_picker is not None:
+        on_location_picker(panel_id)
+
+
+def _emit_source(
+    _button: urwid.Button,
+    user_data: tuple[KnownSource, Callable[[KnownSource], object] | None],
+) -> None:
+    source, on_select = user_data
+    if on_select is not None:
+        on_select(source)
 
 
 def _command_footer(

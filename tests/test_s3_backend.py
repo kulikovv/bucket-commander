@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Coroutine, Mapping
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, BinaryIO, TypeVar
 
 import pytest
 
@@ -31,6 +31,16 @@ class FakeS3Client:
             "ETag": "etag",
             "ContentType": "text/plain",
         }
+
+    async def delete_object(self, **kwargs: object) -> Mapping[str, object]:
+        _ = kwargs
+        return {}
+
+    async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
+        _ = fileobj, bucket, key
+
+    async def download_fileobj(self, bucket: str, key: str, fileobj: BinaryIO) -> None:
+        _ = bucket, key, fileobj
 
 
 class FakeS3ClientContext:
@@ -153,6 +163,7 @@ def test_location_profile_and_region_override_backend_defaults() -> None:
                 prefix="logs/",
                 profile="panel-profile",
                 region="eu-west-1",
+                endpoint_url="http://127.0.0.1:9000",
             )
         )
     )
@@ -161,9 +172,37 @@ def test_location_profile_and_region_override_backend_defaults() -> None:
         {
             "profile_name": "panel-profile",
             "region_name": "eu-west-1",
-            "endpoint_url": "http://localhost:9000",
+            "endpoint_url": "http://127.0.0.1:9000",
         }
     ]
+
+
+def test_s3_entries_preserve_location_connection_metadata() -> None:
+    client = FakeS3Client(
+        (
+            {
+                "CommonPrefixes": [{"Prefix": "logs/archive/"}],
+                "Contents": [{"Key": "logs/a.txt", "Size": 5}],
+                "IsTruncated": False,
+            },
+        )
+    )
+    location = S3Location(
+        bucket="example-bucket",
+        prefix="logs/",
+        profile="panel-profile",
+        region="eu-west-1",
+        endpoint_url="http://127.0.0.1:9000",
+    )
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    entries = run_async(backend.list(location))
+
+    assert {
+        entry.location.endpoint_url
+        for entry in entries
+        if isinstance(entry.location, S3Location)
+    } == {"http://127.0.0.1:9000"}
 
 
 def test_stat_reads_object_head_metadata() -> None:
@@ -177,11 +216,16 @@ def test_stat_reads_object_head_metadata() -> None:
     assert entry.metadata["content_type"] == "text/plain"
 
 
-def test_s3_write_operations_are_not_implemented_yet() -> None:
+def test_s3_copy_operations_are_not_implemented_yet() -> None:
     backend = S3Backend(client_factory=RecordingClientFactory(FakeS3Client(())))
 
     with pytest.raises(BackendError) as error_info:
-        run_async(backend.delete(parse_location("s3://example-bucket/logs/a.txt")))
+        run_async(
+            backend.copy(
+                parse_location("s3://example-bucket/logs/a.txt"),
+                parse_location("s3://example-bucket/copy/"),
+            )
+        )
 
     assert error_info.value.kind is BackendErrorKind.UNSUPPORTED
 

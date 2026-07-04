@@ -37,9 +37,39 @@ class BackendRouter(Backend):
         *,
         progress: ProgressSink | None = None,
     ) -> OperationResult:
+        last_error: BackendError | None = None
+        for backend in self._backends:
+            if not backend.supports(source):
+                continue
+            try:
+                return await backend.copy(source, destination, progress=progress)
+            except BackendError as error:
+                if error.kind not in {
+                    BackendErrorKind.INVALID_LOCATION,
+                    BackendErrorKind.UNSUPPORTED,
+                }:
+                    raise
+                last_error = error
+        if last_error is not None:
+            raise last_error
         return await self._backend_for(source).copy(source, destination, progress=progress)
 
     async def move(self, source: Location, destination: Location) -> OperationResult:
+        last_error: BackendError | None = None
+        for backend in self._backends:
+            if not backend.supports(source):
+                continue
+            try:
+                return await backend.move(source, destination)
+            except BackendError as error:
+                if error.kind not in {
+                    BackendErrorKind.INVALID_LOCATION,
+                    BackendErrorKind.UNSUPPORTED,
+                }:
+                    raise
+                last_error = error
+        if last_error is not None:
+            raise last_error
         return await self._backend_for(source).move(source, destination)
 
     async def rename(self, source: Location, new_name: str) -> OperationResult:
