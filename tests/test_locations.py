@@ -55,6 +55,12 @@ def test_s3_prefix_parent_and_child() -> None:
     assert location.child("c") == S3Location(bucket="example-bucket", prefix="a/b/c/")
 
 
+def test_s3_single_segment_prefix_parent_is_bucket_root() -> None:
+    location = S3Location(bucket="example-bucket", prefix="logs/")
+
+    assert location.parent() == S3Location(bucket="example-bucket")
+
+
 @pytest.mark.parametrize(
     "value",
     [

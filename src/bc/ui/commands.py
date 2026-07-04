@@ -89,6 +89,8 @@ async def enter(state: TwoPanelState, backend: Backend) -> TwoPanelState:
     entry = panel.current_entry
     if entry is None:
         return state.with_status("No entry selected")
+    if entry.name == "..":
+        return await go_parent(state, backend)
     if entry.entry_type not in {EntryType.DIRECTORY, EntryType.PREFIX}:
         return state.with_status(f"{entry.name} is not a directory")
     next_panel = PanelState(location=entry.location)

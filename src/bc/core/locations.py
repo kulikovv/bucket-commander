@@ -99,7 +99,8 @@ class S3Location:
     def parent(self) -> S3Location | None:
         if not self.prefix:
             return None
-        parent_prefix = self.prefix.rstrip("/").rsplit("/", maxsplit=1)[0]
+        parts = self.prefix.rstrip("/").rsplit("/", maxsplit=1)
+        parent_prefix = parts[0] if len(parts) > 1 else ""
         if parent_prefix:
             parent_prefix = f"{parent_prefix}/"
         return S3Location(

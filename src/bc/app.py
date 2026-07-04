@@ -287,11 +287,6 @@ class BucketCommanderApp:
         self._after_task_start(started, "delete")
 
     def _operation_source_panel(self) -> PanelId:
-        if self._state.active.selected_entries:
-            return self._state.focused
-        other = self._state.focused.other
-        if self._state.panel(other).selected_entries:
-            return other
         return self._state.focused
 
     def _operation_entries(self, panel_id: PanelId | None = None) -> tuple[Entry, ...]:

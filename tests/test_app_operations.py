@@ -45,7 +45,7 @@ def wait_for_task(manager: TaskManager, task_id: str) -> TaskRecord:
     raise AssertionError(f"Task {task_id} did not finish")
 
 
-def test_operation_entries_prefer_marked_entries_in_other_panel_over_cursor(
+def test_operation_entries_ignore_marked_entries_in_other_panel(
     tmp_path: Path,
 ) -> None:
     current = Entry(
@@ -73,16 +73,18 @@ def test_operation_entries_prefer_marked_entries_in_other_panel_over_cursor(
             focused=PanelId.RIGHT,
         )
 
-        assert app._operation_source_panel() is PanelId.LEFT
-        assert app._operation_entries() == (selected,)
+        assert app._operation_source_panel() is PanelId.RIGHT
+        assert app._operation_entries() == (current,)
     finally:
         app._tasks.close()
 
 
-def test_copy_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
+def test_copy_task_ignores_marked_entries_when_other_panel_is_focused(
     tmp_path: Path,
 ) -> None:
-    current_path = tmp_path / "current.txt"
+    source_panel_path = tmp_path / "source-panel"
+    source_panel_path.mkdir()
+    current_path = source_panel_path / "current.txt"
     selected_path = tmp_path / "selected.txt"
     destination_path = tmp_path / "destination"
     current_path.write_text("current", encoding="utf-8")
@@ -98,16 +100,16 @@ def test_copy_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=destination_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=destination_path, right=source_panel_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(
-                location=parse_location(tmp_path),
+                location=parse_location(destination_path),
                 entries=(selected,),
                 selected_uris=frozenset({selected.uri}),
             ),
             right=PanelState(
-                location=parse_location(destination_path),
+                location=parse_location(source_panel_path),
                 entries=(current,),
             ),
             focused=PanelId.RIGHT,
@@ -118,19 +120,21 @@ def test_copy_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
         records = app._tasks.records()
         assert len(records) == 1
         assert records[0].task_type is TaskType.COPY
-        assert records[0].source == selected.location
+        assert records[0].source == current.location
         assert records[0].destination == parse_location(destination_path)
         wait_for_task(app._tasks, records[0].task_id)
-        assert (destination_path / "selected.txt").exists()
-        assert not (destination_path / "current.txt").exists()
+        assert (destination_path / "current.txt").exists()
+        assert not (destination_path / "selected.txt").exists()
     finally:
         app._tasks.close()
 
 
-def test_move_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
+def test_move_task_ignores_marked_entries_when_other_panel_is_focused(
     tmp_path: Path,
 ) -> None:
-    current_path = tmp_path / "current.txt"
+    source_panel_path = tmp_path / "source-panel"
+    source_panel_path.mkdir()
+    current_path = source_panel_path / "current.txt"
     selected_path = tmp_path / "selected.txt"
     destination_path = tmp_path / "destination"
     current_path.write_text("current", encoding="utf-8")
@@ -146,16 +150,16 @@ def test_move_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
         name="selected.txt",
         entry_type=EntryType.FILE,
     )
-    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=destination_path))
+    app = BucketCommanderApp(AppConfig.from_paths(left=destination_path, right=source_panel_path))
     try:
         app._state = TwoPanelState(
             left=PanelState(
-                location=parse_location(tmp_path),
+                location=parse_location(destination_path),
                 entries=(selected,),
                 selected_uris=frozenset({selected.uri}),
             ),
             right=PanelState(
-                location=parse_location(destination_path),
+                location=parse_location(source_panel_path),
                 entries=(current,),
             ),
             focused=PanelId.RIGHT,
@@ -166,16 +170,16 @@ def test_move_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
         records = app._tasks.records()
         assert len(records) == 1
         assert records[0].task_type is TaskType.MOVE
-        assert records[0].source == selected.location
+        assert records[0].source == current.location
         wait_for_task(app._tasks, records[0].task_id)
-        assert (destination_path / "selected.txt").exists()
-        assert current_path.exists()
-        assert not selected_path.exists()
+        assert (destination_path / "current.txt").exists()
+        assert not current_path.exists()
+        assert selected_path.exists()
     finally:
         app._tasks.close()
 
 
-def test_delete_task_uses_marked_entries_over_cursor_when_other_panel_is_focused(
+def test_delete_task_ignores_marked_entries_when_other_panel_is_focused(
     tmp_path: Path,
 ) -> None:
     current_path = tmp_path / "current.txt"
@@ -212,9 +216,9 @@ def test_delete_task_uses_marked_entries_over_cursor_when_other_panel_is_focused
         records = app._tasks.records()
         assert len(records) == 1
         assert records[0].task_type is TaskType.DELETE
-        assert records[0].source == selected.location
+        assert records[0].source == current.location
         wait_for_task(app._tasks, records[0].task_id)
-        assert current_path.exists()
-        assert not selected_path.exists()
+        assert not current_path.exists()
+        assert selected_path.exists()
     finally:
         app._tasks.close()

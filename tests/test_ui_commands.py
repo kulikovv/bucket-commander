@@ -160,6 +160,38 @@ def test_go_parent_supports_s3_prefix_locations(tmp_path: Path) -> None:
     assert [entry.name for entry in parent.left.entries] == [".."]
 
 
+def test_refresh_adds_s3_bucket_root_parent_entry(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location("s3://example-bucket/logs/")),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    refreshed = run_async(refresh(state, PanelId.LEFT, StaticBackend(())))
+
+    assert refreshed.left.entries[0].name == ".."
+    assert refreshed.left.entries[0].location == parse_location("s3://example-bucket/")
+
+
+def test_enter_parent_entry_returns_to_s3_bucket_root(tmp_path: Path) -> None:
+    parent_entry = Entry(
+        location=parse_location("s3://example-bucket/"),
+        name="..",
+        entry_type=EntryType.PREFIX,
+    )
+    state = TwoPanelState(
+        left=PanelState(
+            location=parse_location("s3://example-bucket/logs/"),
+            entries=(parent_entry,),
+        ),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    entered = run_async(enter(state, StaticBackend(())))
+
+    assert entered.left.location == parse_location("s3://example-bucket/")
+    assert entered.left.entries == ()
+
+
 class StaticBackend(LocalBackend):
     def __init__(self, entries: tuple[Entry, ...]) -> None:
         self._entries = entries
