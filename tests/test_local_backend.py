@@ -49,6 +49,16 @@ def test_stat_returns_single_entry(tmp_path: Path) -> None:
     assert entry.size == len(payload)
 
 
+def test_preview_reads_file_with_truncation(tmp_path: Path) -> None:
+    target = tmp_path / "document.txt"
+    target.write_text("abcdef", encoding="utf-8")
+
+    preview = run(LocalBackend().preview(local(target), max_bytes=3))
+
+    assert preview.data == b"abc"
+    assert preview.truncated
+
+
 def test_mkdir_creates_directory(tmp_path: Path) -> None:
     target = local(tmp_path / "one" / "two")
 

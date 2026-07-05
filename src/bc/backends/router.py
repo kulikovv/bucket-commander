@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bc.backends.base import Backend, BackendError, BackendErrorKind
+from bc.backends.base import Backend, BackendError, BackendErrorKind, PreviewResult
 from bc.core import Entry, Location, OperationResult
 from bc.core.task_manager import ProgressSink
 
@@ -26,6 +26,9 @@ class BackendRouter(Backend):
 
     async def stat(self, location: Location) -> Entry:
         return await self._backend_for(location).stat(location)
+
+    async def preview(self, location: Location, *, max_bytes: int) -> PreviewResult:
+        return await self._backend_for(location).preview(location, max_bytes=max_bytes)
 
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         return await self._backend_for(location).mkdir(location, parents=parents)

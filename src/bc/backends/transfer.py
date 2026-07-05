@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import SupportsInt
 
-from bc.backends.base import Backend, BackendError, BackendErrorKind
+from bc.backends.base import Backend, BackendError, BackendErrorKind, PreviewResult
 from bc.backends.local import LocalBackend
 from bc.backends.s3 import S3Backend, S3Client, S3ClientFactory
 from bc.core import Entry, LocalLocation, Location, OperationResult, S3Location
@@ -34,6 +34,10 @@ class TransferBackend(Backend):
 
     async def stat(self, location: Location) -> Entry:
         raise _unsupported("Transfer backend does not stat locations", location)
+
+    async def preview(self, location: Location, *, max_bytes: int) -> PreviewResult:
+        _ = max_bytes
+        raise _unsupported("Transfer backend does not preview locations", location)
 
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         _ = parents

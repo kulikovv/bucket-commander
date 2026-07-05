@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import StrEnum
 
 from bc.core import Entry, Location, OperationResult
@@ -39,6 +40,14 @@ class BackendError(Exception):
         self.destination = destination
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewResult:
+    """Small content preview returned by storage backends."""
+
+    data: bytes
+    truncated: bool = False
+
+
 class Backend(ABC):
     """Async storage backend interface consumed by UI, task, and job layers."""
 
@@ -55,6 +64,10 @@ class Backend(ABC):
     @abstractmethod
     async def stat(self, location: Location) -> Entry:
         """Return metadata for a single location."""
+
+    @abstractmethod
+    async def preview(self, location: Location, *, max_bytes: int) -> PreviewResult:
+        """Return up to `max_bytes` for displaying one file or object."""
 
     @abstractmethod
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:

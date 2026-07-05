@@ -14,7 +14,6 @@ from bc.backends import BackendError, BackendRouter, LocalBackend, S3Backend, Tr
 from bc.config import KnownSource, SourcesConfig
 from bc.core import (
     Entry,
-    LocalLocation,
     OperationResult,
     PanelState,
     TaskContext,
@@ -33,14 +32,20 @@ from bc.ui.commands import (
     switch_focus,
     toggle_selection,
 )
-from bc.ui.panels import UiCommand, render_app, render_help_overlay, render_location_picker_overlay
+from bc.ui.panels import (
+    UiCommand,
+    render_app,
+    render_help_overlay,
+    render_location_picker_overlay,
+    render_view_overlay,
+)
 
 PENDING_COMMAND_KEYS = {
-    "f3": "View",
     "f4": "New file",
     "f7": "New folder",
 }
 TASK_POLL_SECONDS = 0.1
+VIEW_MAX_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +75,7 @@ class BucketCommanderApp:
         )
         self._loop: urwid.MainLoop | None = None
         self._is_help_open = False
+        self._view_dialog: tuple[str, str] | None = None
         self._location_picker_panel: PanelId | None = None
         self._sources = config.sources.sources
         self._tasks = TaskManager()
@@ -93,9 +99,7 @@ class BucketCommanderApp:
     def _handle_key(self, key: str | tuple[str, int, int, int]) -> None:
         if not isinstance(key, str):
             return
-        if self._handle_help_key(key):
-            return
-        if self._handle_location_picker_key(key):
+        if self._handle_modal_key(key):
             return
         if key in {"q", "Q", "esc"}:
             raise urwid.ExitMainLoop()
@@ -108,6 +112,13 @@ class BucketCommanderApp:
             return
         if key in PENDING_COMMAND_KEYS:
             self._show_pending_command(PENDING_COMMAND_KEYS[key])
+
+    def _handle_modal_key(self, key: str) -> bool:
+        return (
+            self._handle_help_key(key)
+            or self._handle_view_key(key)
+            or self._handle_location_picker_key(key)
+        )
 
     def _handle_panel_key(self, key: str) -> bool:
         if key == "tab":
@@ -135,6 +146,13 @@ class BucketCommanderApp:
             self._close_help_dialog()
         return True
 
+    def _handle_view_key(self, key: str) -> bool:
+        if self._view_dialog is None:
+            return False
+        if key in {"q", "Q", "esc", "enter", "f3"}:
+            self._close_view_dialog()
+        return True
+
     def _handle_location_picker_key(self, key: str) -> bool:
         if self._location_picker_panel is None:
             return False
@@ -143,7 +161,9 @@ class BucketCommanderApp:
         return True
 
     def _handle_task_key(self, key: str) -> bool:
-        if key == "f5":
+        if key == "f3":
+            self._view_current_entry()
+        elif key == "f5":
             self._start_copy_tasks()
         elif key == "f6":
             self._start_move_tasks()
@@ -159,7 +179,7 @@ class BucketCommanderApp:
         if command is UiCommand.HELP:
             self._show_help_dialog()
         elif command is UiCommand.VIEW:
-            self._show_pending_command("View")
+            self._view_current_entry()
         elif command is UiCommand.NEW_FILE:
             self._show_pending_command("New file")
         elif command is UiCommand.SELECT:
@@ -193,6 +213,10 @@ class BucketCommanderApp:
         self._is_help_open = False
         self._redraw()
 
+    def _close_view_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._view_dialog = None
+        self._redraw()
+
     def _show_location_picker(self, panel_id: PanelId) -> None:
         self._location_picker_panel = panel_id
         self._redraw()
@@ -208,6 +232,28 @@ class BucketCommanderApp:
         self._location_picker_panel = None
         self._state = self._state.with_panel(panel_id, PanelState(location=source.location))
         self._refresh_panel(panel_id)
+
+    def _view_current_entry(self) -> None:
+        entry = self._state.active.current_entry
+        if entry is None:
+            self._update(self._state.with_status("No entry selected"))
+            return
+        if entry.name == "..":
+            self._update(self._state.with_status("Cannot view parent entry"))
+            return
+        self._run_view_command(entry)
+
+    def _run_view_command(self, entry: Entry) -> None:
+        try:
+            preview = asyncio.run(self._backend.preview(entry.location, max_bytes=VIEW_MAX_BYTES))
+        except BackendError as error:
+            self._update(self._state.with_status(str(error)))
+            return
+        text = preview.data.decode("utf-8", errors="replace")
+        if preview.truncated:
+            text = f"{text}\n\n[truncated at {VIEW_MAX_BYTES} bytes]"
+        self._view_dialog = (entry.name, text)
+        self._redraw()
 
     def _start_copy_tasks(self) -> None:
         source_panel = self._operation_source_panel()
@@ -273,14 +319,19 @@ class BucketCommanderApp:
             return
         started = 0
         for entry in entries:
-            if not isinstance(entry.location, LocalLocation) or entry.name == "..":
+            if entry.name == "..":
                 continue
 
             async def delete_task(
                 context: TaskContext,
                 source: Location = entry.location,
+                recursive: bool = entry.is_container,
             ) -> OperationResult:
-                return await self._backend.delete(source, recursive=True, progress=context.progress)
+                return await self._backend.delete(
+                    source,
+                    recursive=recursive,
+                    progress=context.progress,
+                )
 
             self._tasks.start_task(TaskType.DELETE, delete_task, source=entry.location)
             started += 1
@@ -343,6 +394,14 @@ class BucketCommanderApp:
         )
         if self._is_help_open:
             return render_help_overlay(app, on_close=self._close_help_dialog)
+        if self._view_dialog is not None:
+            title, content = self._view_dialog
+            return render_view_overlay(
+                app,
+                title=title,
+                content=content,
+                on_close=self._close_view_dialog,
+            )
         if self._location_picker_panel is not None:
             return render_location_picker_overlay(
                 app,

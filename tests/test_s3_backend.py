@@ -11,12 +11,14 @@ from bc.core import EntryType, S3Location, parse_location
 T = TypeVar("T")
 FIRST_OBJECT_SIZE = 11
 HEAD_OBJECT_SIZE = 42
+PREFIX_DELETE_COUNT = 2
 
 
 class FakeS3Client:
     def __init__(self, pages: tuple[Mapping[str, object], ...]) -> None:
         self._pages = pages
         self.list_requests: list[dict[str, object]] = []
+        self.delete_requests: list[dict[str, object]] = []
 
     async def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
         self.list_requests.append(dict(kwargs))
@@ -32,8 +34,16 @@ class FakeS3Client:
             "ContentType": "text/plain",
         }
 
-    async def delete_object(self, **kwargs: object) -> Mapping[str, object]:
+    async def get_object(self, **kwargs: object) -> Mapping[str, object]:
         _ = kwargs
+        return {"Body": FakeBody(b"hello from s3")}
+
+    async def delete_object(self, **kwargs: object) -> Mapping[str, object]:
+        self.delete_requests.append(dict(kwargs))
+        return {}
+
+    async def delete_objects(self, **kwargs: object) -> Mapping[str, object]:
+        self.delete_requests.append(dict(kwargs))
         return {}
 
     async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
@@ -41,6 +51,14 @@ class FakeS3Client:
 
     async def download_fileobj(self, bucket: str, key: str, fileobj: BinaryIO) -> None:
         _ = bucket, key, fileobj
+
+
+class FakeBody:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def read(self) -> bytes:
+        return self._data
 
 
 class FakeS3ClientContext:
@@ -214,6 +232,74 @@ def test_stat_reads_object_head_metadata() -> None:
     assert entry.entry_type is EntryType.OBJECT
     assert entry.size == HEAD_OBJECT_SIZE
     assert entry.metadata["content_type"] == "text/plain"
+
+
+def test_preview_reads_object_bytes() -> None:
+    client = FakeS3Client(())
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    preview = run_async(
+        backend.preview(parse_location("s3://example-bucket/logs/a.txt"), max_bytes=5)
+    )
+
+    assert preview.data == b"hello"
+    assert preview.truncated
+
+
+def test_delete_object_calls_s3_delete_object() -> None:
+    client = FakeS3Client(())
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    result = run_async(backend.delete(parse_location("s3://example-bucket/logs/a.txt")))
+
+    assert result.ok
+    assert client.delete_requests == [{"Bucket": "example-bucket", "Key": "logs/a.txt"}]
+
+
+def test_recursive_delete_object_falls_back_to_exact_key() -> None:
+    client = FakeS3Client(({"Contents": [], "IsTruncated": False},))
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    result = run_async(
+        backend.delete(parse_location("s3://example-bucket/logs/a.txt"), recursive=True)
+    )
+
+    assert result.ok
+    assert client.list_requests == [
+        {
+            "Bucket": "example-bucket",
+            "Prefix": "logs/a.txt/",
+        }
+    ]
+    assert client.delete_requests == [{"Bucket": "example-bucket", "Key": "logs/a.txt"}]
+
+
+def test_delete_prefix_batches_s3_objects() -> None:
+    client = FakeS3Client(
+        (
+            {
+                "Contents": [
+                    {"Key": "logs/a.txt"},
+                    {"Key": "logs/b.txt"},
+                ],
+                "IsTruncated": False,
+            },
+        )
+    )
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    result = run_async(backend.delete(parse_location("s3://example-bucket/logs/"), recursive=True))
+
+    assert result.entries_affected == PREFIX_DELETE_COUNT
+    assert client.delete_requests == [
+        {
+            "Bucket": "example-bucket",
+            "Delete": {
+                "Objects": [{"Key": "logs/a.txt"}, {"Key": "logs/b.txt"}],
+                "Quiet": True,
+            },
+        }
+    ]
 
 
 def test_s3_copy_operations_are_not_implemented_yet() -> None:

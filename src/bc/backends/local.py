@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from bc.backends.base import Backend, BackendError, BackendErrorKind
+from bc.backends.base import Backend, BackendError, BackendErrorKind, PreviewResult
 from bc.core import Entry, EntryType, LocalLocation, Location, OperationResult
 from bc.core.task_manager import ProgressSink
 
@@ -34,6 +34,10 @@ class LocalBackend(Backend):
     async def stat(self, location: Location) -> Entry:
         local = self._require_local(location)
         return await self._run(lambda: self._entry_for_path(local.path))
+
+    async def preview(self, location: Location, *, max_bytes: int) -> PreviewResult:
+        local = self._require_local(location)
+        return await self._run(lambda: self._preview_sync(local, max_bytes=max_bytes))
 
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         local = self._require_local(location)
@@ -120,6 +124,17 @@ class LocalBackend(Backend):
             destination=location,
             entries_affected=1,
         )
+
+    def _preview_sync(self, location: LocalLocation, *, max_bytes: int) -> PreviewResult:
+        if location.path.is_dir():
+            raise BackendError(
+                BackendErrorKind.IS_A_DIRECTORY,
+                f"Cannot view directory: {location.path}",
+                location=location,
+            )
+        with location.path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+        return PreviewResult(data=data[:max_bytes], truncated=len(data) > max_bytes)
 
     def _copy_sync(
         self,

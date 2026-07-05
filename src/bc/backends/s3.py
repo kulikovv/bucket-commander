@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import BinaryIO, Protocol, SupportsInt, cast
 
-from bc.backends.base import Backend, BackendError, BackendErrorKind
+from bc.backends.base import Backend, BackendError, BackendErrorKind, PreviewResult
 from bc.core import Entry, EntryType, Location, OperationResult, S3Location
 from bc.core.task_manager import ProgressSink
 
@@ -22,8 +23,14 @@ class S3Client(Protocol):
     async def head_object(self, **kwargs: object) -> Mapping[str, object]:
         """Return one `HeadObject` response."""
 
+    async def get_object(self, **kwargs: object) -> Mapping[str, object]:
+        """Return one `GetObject` response."""
+
     async def delete_object(self, **kwargs: object) -> Mapping[str, object]:
         """Delete one object."""
+
+    async def delete_objects(self, **kwargs: object) -> Mapping[str, object]:
+        """Delete a batch of objects."""
 
     async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
         """Upload one file-like object."""
@@ -121,6 +128,25 @@ class S3Backend(Backend):
             raise _backend_error(error, location=s3_location) from error
         return _object_entry_from_head(s3_location, object_key, response)
 
+    async def preview(self, location: Location, *, max_bytes: int) -> PreviewResult:
+        s3_location = self._require_s3(location)
+        if not s3_location.prefix:
+            raise _unsupported("Cannot view an S3 bucket root", location)
+        key = s3_location.prefix.rstrip("/")
+        try:
+            async with self._client(s3_location) as client:
+                response = await client.get_object(
+                    Bucket=s3_location.bucket,
+                    Key=key,
+                    Range=f"bytes=0-{max_bytes}",
+                )
+                data = await _read_body(response.get("Body"))
+        except BackendError:
+            raise
+        except Exception as error:
+            raise _backend_error(error, location=s3_location) from error
+        return PreviewResult(data=data[:max_bytes], truncated=len(data) > max_bytes)
+
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         _ = parents
         raise _unsupported("S3 prefix creation is not implemented yet", location)
@@ -216,6 +242,8 @@ class S3Backend(Backend):
         progress: ProgressSink | None,
     ) -> OperationResult:
         keys = await self._list_object_keys(location)
+        if not keys:
+            return await self._delete_object(location, progress)
         _progress_update(
             progress,
             items_total=len(keys),
@@ -223,11 +251,14 @@ class S3Backend(Backend):
             message=f"Deleting {location.name}",
         )
         async with self._client(location) as client:
-            for key in keys:
+            for batch in _chunks(keys, 1000):
                 _progress_raise_if_cancelled(progress)
-                _progress_update(progress, current_item=f"s3://{location.bucket}/{key}")
-                await client.delete_object(Bucket=location.bucket, Key=key)
-                _progress_advance(progress, items=1)
+                _progress_update(progress, current_item=f"{len(batch)} object batch")
+                await client.delete_objects(
+                    Bucket=location.bucket,
+                    Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+                )
+                _progress_advance(progress, items=len(batch))
         return OperationResult.success(
             f"Deleted {location.uri}",
             source=location,
@@ -370,6 +401,24 @@ def _sequence_of_mappings(value: object) -> tuple[Mapping[str, object], ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
     return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _chunks(values: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
+    return tuple(tuple(values[index : index + size]) for index in range(0, len(values), size))
+
+
+async def _read_body(body: object) -> bytes:
+    read = getattr(body, "read", None)
+    if read is None:
+        msg = "S3 get_object response did not include a readable body"
+        raise TypeError(msg)
+    data = read()
+    if inspect.isawaitable(data):
+        data = await data
+    if isinstance(data, bytes):
+        return data
+    msg = f"Expected S3 body bytes, got {type(data).__name__}"
+    raise TypeError(msg)
 
 
 def _prefix_name(prefix: str, parent_prefix: str) -> str:

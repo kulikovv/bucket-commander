@@ -142,6 +142,36 @@ def render_help_overlay(
     )
 
 
+def render_view_overlay(
+    base: urwid.Widget,
+    *,
+    title: str,
+    content: str,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place a file/object preview dialog over the current application."""
+
+    lines = content.splitlines() or [""]
+    body = urwid.ListBox(urwid.SimpleFocusListWalker([urwid.Text(line) for line in lines]))
+    close_button = urwid.Button("Close", on_press=on_close)
+    content_widget = urwid.Pile(
+        [
+            ("weight", 1, body),
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Padding(close_button, align="center", width=14)),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content_widget, title=f" View: {title} "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 78),
+        valign="middle",
+        height=("relative", 72),
+    )
+
+
 def render_location_picker_overlay(
     base: urwid.Widget,
     sources: tuple[KnownSource, ...],

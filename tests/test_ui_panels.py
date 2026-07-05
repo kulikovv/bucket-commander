@@ -6,7 +6,12 @@ from bc.app import AppConfig, BucketCommanderApp
 from bc.config import KnownSource
 from bc.core import PanelState, S3Location, parse_location
 from bc.ui.commands import PanelId, TwoPanelState
-from bc.ui.panels import render_app, render_help_overlay, render_location_picker_overlay
+from bc.ui.panels import (
+    render_app,
+    render_help_overlay,
+    render_location_picker_overlay,
+    render_view_overlay,
+)
 
 
 def test_render_app_includes_help_button(tmp_path: Path) -> None:
@@ -75,6 +80,22 @@ def test_render_help_overlay_lists_commands(tmp_path: Path) -> None:
     assert "< Close" in rendered
 
 
+def test_render_view_overlay_shows_content(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(
+        render_view_overlay(render_app(state), title="document.txt", content="hello\nworld")
+    )
+
+    assert "View: document.txt" in rendered
+    assert "hello" in rendered
+    assert "world" in rendered
+    assert "< Close" in rendered
+
+
 def test_help_keys_toggle_modal_without_running_loop(tmp_path: Path) -> None:
     app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
 
@@ -83,6 +104,15 @@ def test_help_keys_toggle_modal_without_running_loop(tmp_path: Path) -> None:
 
     app._handle_key("esc")
     assert not app._is_help_open
+
+
+def test_view_key_closes_modal_without_running_loop(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    app._view_dialog = ("document.txt", "content")
+
+    app._handle_key("esc")
+
+    assert app._view_dialog is None
 
 
 def test_select_location_source_updates_target_panel(tmp_path: Path) -> None:

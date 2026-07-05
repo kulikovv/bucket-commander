@@ -32,8 +32,21 @@ class FakeTransferS3Client:
         key = f"{kwargs['Bucket']}/{kwargs['Key']}"
         return {"ContentLength": len(self.objects[key])}
 
+    async def get_object(self, **kwargs: object) -> Mapping[str, object]:
+        _ = kwargs
+        return {"Body": FakeTransferBody(b"")}
+
     async def delete_object(self, **kwargs: object) -> Mapping[str, object]:
         self.objects.pop(f"{kwargs['Bucket']}/{kwargs['Key']}", None)
+        return {}
+
+    async def delete_objects(self, **kwargs: object) -> Mapping[str, object]:
+        bucket = str(kwargs["Bucket"])
+        delete = kwargs["Delete"]
+        assert isinstance(delete, dict)
+        for item in delete["Objects"]:
+            assert isinstance(item, dict)
+            self.objects.pop(f"{bucket}/{item['Key']}", None)
         return {}
 
     async def upload_fileobj(self, handle: BinaryIO, bucket: str, key: str) -> None:
@@ -57,6 +70,14 @@ class FakeTransferS3ClientContext:
         traceback: object | None,
     ) -> bool | None:
         return None
+
+
+class FakeTransferBody:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def read(self) -> bytes:
+        return self._data
 
 
 class FakeTransferS3ClientFactory:
