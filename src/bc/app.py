@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,8 @@ from bc.ui.commands import (
     PanelId,
     TwoPanelState,
     enter,
+    focus_panel,
+    focus_panel_item,
     go_parent,
     move_cursor,
     refresh,
@@ -46,6 +49,7 @@ PENDING_COMMAND_KEYS = {
 }
 TASK_POLL_SECONDS = 0.1
 VIEW_MAX_BYTES = 64 * 1024
+DOUBLE_CLICK_SECONDS = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +81,12 @@ class BucketCommanderApp:
         self._is_help_open = False
         self._view_dialog: tuple[str, str] | None = None
         self._location_picker_panel: PanelId | None = None
-        self._sources = config.sources.sources
+        self._sources = _with_builtin_sources(config.sources.sources)
+        self._panel_focus_rows: dict[PanelId, int | None] = {
+            PanelId.LEFT: None,
+            PanelId.RIGHT: None,
+        }
+        self._last_mouse_click: tuple[PanelId, str, float] | None = None
         self._tasks = TaskManager()
         self._task_poll_scheduled = False
         self._handled_terminal_tasks: set[str] = set()
@@ -198,6 +207,41 @@ class BucketCommanderApp:
             self._cancel_latest_task()
         elif command is UiCommand.QUIT:
             raise urwid.ExitMainLoop()
+
+    def _handle_panel_mouse(
+        self,
+        panel_id: PanelId,
+        index: int | None,
+        *,
+        toggle_mark: bool = False,
+        viewport_row: int | None = None,
+    ) -> None:
+        self._panel_focus_rows[panel_id] = viewport_row
+        if index is None:
+            self._last_mouse_click = None
+            self._update(focus_panel(self._state, panel_id))
+            return
+        clicked_entry = self._state.panel(panel_id).entries[index]
+        is_double_click = self._is_double_click(panel_id, clicked_entry)
+        self._update(focus_panel_item(self._state, panel_id, index, toggle_mark=toggle_mark))
+        if toggle_mark:
+            self._last_mouse_click = None
+            return
+        self._last_mouse_click = (panel_id, clicked_entry.uri, time.monotonic())
+        if is_double_click and (clicked_entry.name == ".." or clicked_entry.is_container):
+            self._last_mouse_click = None
+            self._run_command(lambda: enter(self._state, self._backend))
+
+    def _is_double_click(self, panel_id: PanelId, entry: Entry) -> bool:
+        last_click = self._last_mouse_click
+        if last_click is None:
+            return False
+        last_panel_id, last_uri, last_time = last_click
+        return (
+            last_panel_id is panel_id
+            and last_uri == entry.uri
+            and time.monotonic() - last_time <= DOUBLE_CLICK_SECONDS
+        )
 
     def _refresh_panel(self, panel_id: PanelId) -> None:
         self._run_command(lambda: refresh(self._state, panel_id, self._backend))
@@ -391,6 +435,8 @@ class BucketCommanderApp:
             on_help=self._show_help_dialog,
             on_command=self._handle_ui_command,
             on_location_picker=self._show_location_picker,
+            on_panel_mouse=self._handle_panel_mouse,
+            panel_focus_rows=self._panel_focus_rows,
         )
         if self._is_help_open:
             return render_help_overlay(app, on_close=self._close_help_dialog)
@@ -445,6 +491,15 @@ def run_app(config: AppConfig) -> int:
     """Run the interactive application."""
 
     return BucketCommanderApp(config).run()
+
+
+def _with_builtin_sources(sources: tuple[KnownSource, ...]) -> tuple[KnownSource, ...]:
+    local_source = KnownSource(
+        name="Local file system",
+        location=parse_location(Path.home()),
+        credential_source="local",
+    )
+    return (local_source, *sources)
 
 
 def _palette() -> list[tuple[str, str, str]]:

@@ -11,6 +11,7 @@ from bc.ui.commands import (
     PanelId,
     TwoPanelState,
     enter,
+    focus_panel_item,
     go_parent,
     move_cursor,
     refresh,
@@ -60,6 +61,38 @@ def test_move_cursor_updates_focused_panel_only(tmp_path: Path) -> None:
 
     assert moved.left.cursor_index == 1
     assert moved.right.cursor_index == 0
+
+
+def test_focus_panel_item_updates_panel_and_cursor(tmp_path: Path) -> None:
+    first = Entry(location=parse_location(tmp_path / "a"), name="a", entry_type=EntryType.FILE)
+    second = Entry(location=parse_location(tmp_path / "b"), name="b", entry_type=EntryType.FILE)
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+        right=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+    )
+
+    focused = focus_panel_item(state, PanelId.RIGHT, 1)
+
+    assert focused.focused is PanelId.RIGHT
+    assert focused.left.cursor_index == 0
+    assert focused.right.cursor_index == 1
+    assert focused.status_message == "Focused b"
+
+
+def test_focus_panel_item_can_toggle_selection(tmp_path: Path) -> None:
+    first = Entry(location=parse_location(tmp_path / "a"), name="a", entry_type=EntryType.FILE)
+    second = Entry(location=parse_location(tmp_path / "b"), name="b", entry_type=EntryType.FILE)
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+        right=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+    )
+
+    selected = focus_panel_item(state, PanelId.RIGHT, 1, toggle_mark=True)
+
+    assert selected.focused is PanelId.RIGHT
+    assert selected.right.cursor_index == 1
+    assert selected.right.selected_entries == (second,)
+    assert selected.status_message == "Selected b"
 
 
 def test_toggle_selection_marks_focused_panel_current_entry(tmp_path: Path) -> None:

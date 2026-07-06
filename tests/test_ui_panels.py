@@ -3,10 +3,11 @@ from pathlib import Path
 import urwid
 
 from bc.app import AppConfig, BucketCommanderApp
-from bc.config import KnownSource
-from bc.core import PanelState, S3Location, parse_location
+from bc.config import KnownSource, SourcesConfig
+from bc.core import Entry, EntryType, PanelState, S3Location, parse_location
 from bc.ui.commands import PanelId, TwoPanelState
 from bc.ui.panels import (
+    PanelListBox,
     render_app,
     render_help_overlay,
     render_location_picker_overlay,
@@ -45,6 +46,149 @@ def test_render_app_includes_location_panel(tmp_path: Path) -> None:
     assert "< Left" in rendered
     assert "< Right" in rendered
     assert "1 known location" in rendered
+
+
+def test_app_adds_local_file_system_source(tmp_path: Path) -> None:
+    source = KnownSource(
+        name="Local MinIO",
+        location=S3Location(bucket="bucket-commander", prefix="logs/"),
+    )
+    app = BucketCommanderApp(
+        AppConfig(
+            left=parse_location(tmp_path),
+            right=parse_location(tmp_path),
+            sources=SourcesConfig((source,)),
+        )
+    )
+    try:
+        assert [source.name for source in app._sources][:2] == [
+            "Local file system",
+            "Local MinIO",
+        ]
+    finally:
+        app._tasks.close()
+
+
+def test_panel_mouse_focuses_item_and_panel(tmp_path: Path) -> None:
+    first = Entry(location=parse_location(tmp_path / "a"), name="a", entry_type=EntryType.FILE)
+    second = Entry(location=parse_location(tmp_path / "b"), name="b", entry_type=EntryType.FILE)
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+            right=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+        )
+
+        app._handle_panel_mouse(PanelId.RIGHT, 1)
+
+        assert app._state.focused is PanelId.RIGHT
+        assert app._state.right.cursor_index == 1
+    finally:
+        app._tasks.close()
+
+
+def test_panel_mouse_can_toggle_item_selection(tmp_path: Path) -> None:
+    first = Entry(location=parse_location(tmp_path / "a"), name="a", entry_type=EntryType.FILE)
+    second = Entry(location=parse_location(tmp_path / "b"), name="b", entry_type=EntryType.FILE)
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+            right=PanelState(location=parse_location(tmp_path), entries=(first, second)),
+        )
+
+        app._handle_panel_mouse(PanelId.RIGHT, 1, toggle_mark=True)
+
+        assert app._state.focused is PanelId.RIGHT
+        assert app._state.right.selected_entries == (second,)
+    finally:
+        app._tasks.close()
+
+
+def test_panel_mouse_double_click_opens_directory(tmp_path: Path) -> None:
+    directory = tmp_path / "folder"
+    directory.mkdir()
+    (directory / "inside.txt").write_text("content", encoding="utf-8")
+    entry = Entry(
+        location=parse_location(directory),
+        name="folder",
+        entry_type=EntryType.DIRECTORY,
+    )
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path), entries=(entry,)),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._handle_panel_mouse(PanelId.LEFT, 0)
+        app._handle_panel_mouse(PanelId.LEFT, 0)
+
+        assert app._state.left.location == parse_location(directory)
+        assert [entry.name for entry in app._state.left.entries] == ["..", "inside.txt"]
+    finally:
+        app._tasks.close()
+
+
+def test_panel_mouse_double_click_file_does_not_open_directory(tmp_path: Path) -> None:
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("content", encoding="utf-8")
+    entry = Entry(
+        location=parse_location(file_path),
+        name="file.txt",
+        entry_type=EntryType.FILE,
+    )
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path), entries=(entry,)),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._handle_panel_mouse(PanelId.LEFT, 0)
+        app._handle_panel_mouse(PanelId.LEFT, 0)
+
+        assert app._state.left.location == parse_location(tmp_path)
+        assert app._state.left.current_entry == entry
+    finally:
+        app._tasks.close()
+
+
+def test_panel_mouse_uses_visible_position_when_list_is_scrolled() -> None:
+    clicked: list[tuple[PanelId, int | None, bool, int | None]] = []
+    rows: list[urwid.Widget] = [urwid.Text(f"item-{index}") for index in range(30)]
+    walker = urwid.SimpleFocusListWalker(rows)
+    walker.set_focus(20)
+    list_box = PanelListBox(
+        walker,
+        panel_id=PanelId.LEFT,
+        row_count=len(rows),
+        on_mouse=lambda panel_id, index, *, toggle_mark=False, viewport_row=None: clicked.append(
+            (panel_id, index, toggle_mark, viewport_row)
+        ),
+    )
+
+    list_box.render((80, 10), focus=True)
+    assert list_box.mouse_event((80, 10), "mouse press", 1, 0, 0, True)
+
+    assert clicked == [(PanelId.LEFT, 20, False, 0)]
+
+
+def test_panel_focus_row_keeps_selected_item_in_place_after_redraw() -> None:
+    rows: list[urwid.Widget] = [urwid.Text(f"item-{index}") for index in range(30)]
+    walker = urwid.SimpleFocusListWalker(rows)
+    walker.set_focus(20)
+    list_box = PanelListBox(
+        walker,
+        panel_id=PanelId.LEFT,
+        row_count=len(rows),
+        focus_row=5,
+    )
+
+    rendered = list_box.render((80, 10), focus=True)
+    lines = [line.decode("utf-8", errors="replace").strip() for line in rendered.text]
+
+    assert lines[5] == "item-20"
 
 
 def test_render_location_picker_overlay_lists_sources(tmp_path: Path) -> None:

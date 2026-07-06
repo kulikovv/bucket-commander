@@ -49,6 +49,35 @@ def switch_focus(state: TwoPanelState) -> TwoPanelState:
     return replace(state, focused=state.focused.other)
 
 
+def focus_panel(state: TwoPanelState, panel_id: PanelId) -> TwoPanelState:
+    return replace(state, focused=panel_id)
+
+
+def focus_panel_item(
+    state: TwoPanelState,
+    panel_id: PanelId,
+    index: int,
+    *,
+    toggle_mark: bool = False,
+) -> TwoPanelState:
+    panel = state.panel(panel_id)
+    if not panel.entries:
+        return focus_panel(state, panel_id)
+    focused_panel = replace(panel, cursor_index=index)
+    if toggle_mark:
+        focused_panel = focused_panel.toggle_selection()
+        entry = focused_panel.current_entry
+        if entry is None:
+            return state.with_panel(panel_id, focused_panel).with_status("No entry selected")
+        action = "Selected" if entry.uri in focused_panel.selected_uris else "Unselected"
+        return replace(state, focused=panel_id).with_panel(panel_id, focused_panel).with_status(
+            f"{action} {entry.name}"
+        )
+    entry = focused_panel.current_entry
+    message = f"Focused {entry.name}" if entry is not None else "No entry selected"
+    return replace(state, focused=panel_id).with_panel(panel_id, focused_panel).with_status(message)
+
+
 def move_cursor(state: TwoPanelState, delta: int) -> TwoPanelState:
     panel = state.active.move_cursor(delta)
     return state.with_panel(state.focused, panel)

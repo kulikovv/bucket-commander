@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 import urwid
 
@@ -17,6 +18,8 @@ SIZE_STEP = 1024.0
 TASK_DETAIL_MAX = 52
 TASK_DETAIL_SUFFIX = 49
 COMMAND_BUTTON_WIDTH = 14
+PRIMARY_MOUSE_BUTTON = 1
+SECONDARY_MOUSE_BUTTON = 3
 COMMAND_BUTTONS = (
     ("Help", "help"),
     ("View", "view"),
@@ -47,6 +50,18 @@ HELP_COMMANDS = (
 )
 
 
+class PanelMouseHandler(Protocol):
+    def __call__(
+        self,
+        panel_id: PanelId,
+        index: int | None,
+        *,
+        toggle_mark: bool = False,
+        viewport_row: int | None = None,
+    ) -> object:
+        ...
+
+
 class UiCommand(StrEnum):
     """Commands exposed by clickable footer buttons."""
 
@@ -71,11 +86,27 @@ def render_app(
     on_help: Callable[[urwid.Button], object] | None = None,
     on_command: Callable[[UiCommand], object] | None = None,
     on_location_picker: Callable[[PanelId], object] | None = None,
+    on_panel_mouse: PanelMouseHandler | None = None,
+    panel_focus_rows: dict[PanelId, int | None] | None = None,
 ) -> urwid.Widget:
     """Render the full two-panel application."""
 
-    left = render_panel(state.left, title="Left", is_focused=state.focused is PanelId.LEFT)
-    right = render_panel(state.right, title="Right", is_focused=state.focused is PanelId.RIGHT)
+    left = render_panel(
+        state.left,
+        title="Left",
+        panel_id=PanelId.LEFT,
+        is_focused=state.focused is PanelId.LEFT,
+        on_mouse=on_panel_mouse,
+        focus_row=panel_focus_rows.get(PanelId.LEFT) if panel_focus_rows else None,
+    )
+    right = render_panel(
+        state.right,
+        title="Right",
+        panel_id=PanelId.RIGHT,
+        is_focused=state.focused is PanelId.RIGHT,
+        on_mouse=on_panel_mouse,
+        focus_row=panel_focus_rows.get(PanelId.RIGHT) if panel_focus_rows else None,
+    )
     body = urwid.Columns(
         [
             ("weight", 1, left),
@@ -365,7 +396,15 @@ def _format_bytes(value: int) -> str:
     return f"{size:.1f}{unit}"
 
 
-def render_panel(panel: PanelState, *, title: str, is_focused: bool) -> urwid.Widget:
+def render_panel(
+    panel: PanelState,
+    *,
+    title: str,
+    panel_id: PanelId,
+    is_focused: bool,
+    on_mouse: PanelMouseHandler | None = None,
+    focus_row: int | None = None,
+) -> urwid.Widget:
     """Render a single file panel."""
 
     status = " loading" if panel.is_loading else ""
@@ -389,7 +428,13 @@ def render_panel(panel: PanelState, *, title: str, is_focused: bool) -> urwid.Wi
     walker = urwid.SimpleFocusListWalker(rows)
     if panel.entries:
         walker.set_focus(panel.cursor_index)
-    list_box = PanelListBox(walker)
+    list_box = PanelListBox(
+        walker,
+        panel_id=panel_id,
+        row_count=len(panel.entries),
+        on_mouse=on_mouse,
+        focus_row=focus_row,
+    )
     body = urwid.AttrMap(list_box, "panel_body")
     panel_frame: urwid.Widget = urwid.Frame(body=body, header=header)
     border_attr = "panel_border_focus" if is_focused else "panel_border"
@@ -448,6 +493,21 @@ def _border_line(left: str, right: str, attr: str) -> urwid.Widget:
 class PanelListBox(urwid.ListBox):
     """ListBox that lets application state own panel cursor movement."""
 
+    def __init__(
+        self,
+        body: urwid.SimpleFocusListWalker[urwid.Widget],
+        *,
+        panel_id: PanelId,
+        row_count: int,
+        on_mouse: PanelMouseHandler | None = None,
+        focus_row: int | None = None,
+    ) -> None:
+        super().__init__(body)
+        self._panel_id = panel_id
+        self._row_count = row_count
+        self._on_mouse = on_mouse
+        self._focus_row = focus_row
+
     def keypress(self, size: tuple[()] | tuple[int] | tuple[int, int], key: str) -> str | None:
         if key in {"up", "down"}:
             return key
@@ -456,6 +516,86 @@ class PanelListBox(urwid.ListBox):
                 return super().keypress((width, height), key)
             case _:
                 return key
+
+    def render(
+        self,
+        size: tuple[()] | tuple[int] | tuple[int, int],
+        focus: bool = False,
+    ) -> urwid.CompositeCanvas | urwid.SolidCanvas:
+        match size:
+            case (width, height):
+                pass
+            case _:
+                msg = "PanelListBox render requires a two-dimensional size"
+                raise ValueError(msg)
+        if self._focus_row is not None:
+            max_row = max(1, height - 1)
+            relative = max(0, min(100, round((self._focus_row / max_row) * 100)))
+            _widget, position = self._body.get_focus()  # type: ignore[no-untyped-call]
+            if position is not None:
+                self.set_focus(position)
+                self.set_focus_valign(("relative", relative))
+        return super().render((width, height), focus)
+
+    def mouse_event(
+        self,
+        size: tuple[()] | tuple[int] | tuple[int, int],
+        event: str,
+        button: int,
+        col: int,
+        row: int,
+        focus: bool,
+    ) -> bool | None:
+        if event == "mouse press" and button in {PRIMARY_MOUSE_BUTTON, SECONDARY_MOUSE_BUTTON}:
+            _ = col, focus
+            index = self._position_at_row(size, row)
+            if self._on_mouse is not None:
+                if button == SECONDARY_MOUSE_BUTTON:
+                    self._on_mouse(
+                        self._panel_id,
+                        index,
+                        toggle_mark=True,
+                        viewport_row=row,
+                    )
+                else:
+                    self._on_mouse(self._panel_id, index, viewport_row=row)
+            return True
+        match size:
+            case (width, height):
+                return super().mouse_event((width, height), event, button, col, row, focus)
+            case _:
+                return False
+
+    def _position_at_row(
+        self,
+        size: tuple[()] | tuple[int] | tuple[int, int],
+        row: int,
+    ) -> int | None:
+        match size:
+            case (width, height):
+                pass
+            case _:
+                return None
+        middle, top, bottom = self.calculate_visible((width, height), focus=True)
+        if middle is None or top is None or bottom is None:
+            return None
+        _offset, focus_widget, focus_pos, focus_rows, _cursor = middle
+        trim_top, fill_above = top
+        _trim_bottom, fill_below = bottom
+
+        visible_rows = [
+            *reversed(fill_above),
+            (focus_widget, focus_pos, focus_rows),
+            *fill_below,
+        ]
+        widget_row = -trim_top
+        for _widget, position, row_count in visible_rows:
+            if widget_row + row_count > row:
+                if isinstance(position, int) and 0 <= position < self._row_count:
+                    return position
+                return None
+            widget_row += row_count
+        return None
 
 
 def _entry_marker(entry_type: EntryType) -> str:
