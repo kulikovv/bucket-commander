@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,9 +10,11 @@ from pathlib import Path
 from typing import TypeVar
 from uuid import uuid4
 
-from bc.core import Entry, EntryType, S3Location
+from bc.core import Entry, S3Location
+from bc.index.cache_paths import account_id, default_cache_root, index_dir
 from bc.index.manifest import CoveredPrefix
-from bc.index.parquet_store import ObjectMetadata, ParquetIndexStore, PrefixMetadata
+from bc.index.metadata import metadata_rows
+from bc.index.parquet_store import ParquetIndexStore
 
 DEFAULT_CACHE_TTL = timedelta(hours=24)
 Result = TypeVar("Result")
@@ -64,7 +64,11 @@ class CacheBackedBucketPanel:
         location: S3Location,
         entries: tuple[Entry, ...],
     ) -> None:
-        objects, prefixes = _metadata_rows(location, entries)
+        objects, prefixes = metadata_rows(
+            location,
+            entries,
+            source_listing_id=f"panel-{uuid4().hex}",
+        )
         store = self._open_store(location)
         if prefixes:
             await _to_thread(store.append_prefixes, prefixes, indexing_mode="on-demand")
@@ -84,23 +88,13 @@ class CacheBackedBucketPanel:
 
     def _open_store(self, location: S3Location) -> ParquetIndexStore:
         return ParquetIndexStore.open(
-            _index_dir(self.cache_root, location),
+            index_dir(self.cache_root, location),
             provider="s3",
-            account_id=_account_id(location),
+            account_id=account_id(location),
             bucket=location.bucket,
             region=location.region,
             endpoint=location.endpoint_url,
         )
-
-
-def default_cache_root() -> Path:
-    configured = os.environ.get("BUCKET_COMMANDER_CACHE_ROOT")
-    if configured:
-        return Path(configured).expanduser()
-    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
-    if xdg_cache_home:
-        return Path(xdg_cache_home).expanduser() / "bucket-commander"
-    return Path.home() / ".cache" / "bucket-commander"
 
 
 async def _to_thread(
@@ -109,60 +103,6 @@ async def _to_thread(
     **kwargs: object,
 ) -> Result:
     return await asyncio.to_thread(function, *args, **kwargs)
-
-
-def _metadata_rows(
-    location: S3Location,
-    entries: tuple[Entry, ...],
-) -> tuple[tuple[ObjectMetadata, ...], tuple[PrefixMetadata, ...]]:
-    timestamp = datetime.now(UTC)
-    source_listing_id = f"panel-{uuid4().hex}"
-    objects: list[ObjectMetadata] = []
-    prefixes: list[PrefixMetadata] = []
-    for entry in entries:
-        if not isinstance(entry.location, S3Location):
-            continue
-        if entry.name == "..":
-            continue
-        if entry.entry_type is EntryType.OBJECT:
-            objects.append(
-                ObjectMetadata(
-                    provider="s3",
-                    account_id=_account_id(location),
-                    bucket=location.bucket,
-                    key=entry.location.prefix.rstrip("/"),
-                    parent_prefix=location.prefix,
-                    name=entry.name,
-                    size=entry.size or 0,
-                    last_modified=entry.modified_at or timestamp,
-                    etag=entry.etag,
-                    storage_class=entry.metadata.get("storage_class"),
-                    content_type=entry.metadata.get("content_type"),
-                    encryption=entry.metadata.get("encryption"),
-                    version_id=entry.metadata.get("version_id"),
-                    discovered_at=timestamp,
-                    refreshed_at=timestamp,
-                    source_listing_id=source_listing_id,
-                )
-            )
-        elif entry.entry_type is EntryType.PREFIX:
-            prefixes.append(
-                PrefixMetadata(
-                    provider="s3",
-                    account_id=_account_id(location),
-                    bucket=location.bucket,
-                    prefix=entry.location.prefix,
-                    parent_prefix=location.prefix,
-                    name=entry.name,
-                    object_count=0,
-                    recursive_object_count=0,
-                    total_size=entry.size or 0,
-                    recursive_total_size=0,
-                    fully_indexed=False,
-                    listed_at=timestamp,
-                )
-            )
-    return tuple(objects), tuple(prefixes)
 
 
 def _with_connection(entry: Entry, panel_location: S3Location) -> Entry:
@@ -214,41 +154,6 @@ def _cache_status(
     state = "stale" if is_stale else "fresh"
     coverage = "partial" if is_partial else "cached"
     return f"{len(entries)} cached entries ({coverage}, {state}); refreshing live"
-
-
-def _index_dir(cache_root: Path, location: S3Location) -> Path:
-    return (
-        cache_root
-        / "indexes"
-        / "s3"
-        / _safe_segment(_account_id(location))
-        / _safe_segment(_scope_id(location))
-        / _safe_segment(location.bucket)
-    )
-
-
-def _account_id(location: S3Location) -> str:
-    if location.profile:
-        return f"profile-{location.profile}"
-    if location.endpoint_url:
-        return f"endpoint-{_short_hash(location.endpoint_url)}"
-    return "default"
-
-
-def _scope_id(location: S3Location) -> str:
-    parts = [location.region or "default-region"]
-    if location.endpoint_url:
-        parts.append(_short_hash(location.endpoint_url))
-    return "-".join(parts)
-
-
-def _short_hash(value: str) -> str:
-    return hashlib.blake2b(value.encode("utf-8"), digest_size=6).hexdigest()
-
-
-def _safe_segment(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-    return "".join(character if character in allowed else "_" for character in value)
 
 
 def _normalize_prefix(prefix: str) -> str:

@@ -16,6 +16,7 @@ from bc.backends import BackendError, BackendRouter, LocalBackend, S3Backend, Tr
 from bc.config import KnownSource, SourcesConfig
 from bc.core import (
     Entry,
+    EntryType,
     OperationResult,
     PanelState,
     S3Location,
@@ -25,7 +26,7 @@ from bc.core import (
     TaskType,
 )
 from bc.core.locations import Location, parse_location
-from bc.index import CacheBackedBucketPanel
+from bc.index import CacheBackedBucketPanel, RecursiveBucketIndexer
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -74,9 +75,13 @@ class BucketCommanderApp:
     """Minimal two-panel local file manager."""
 
     def __init__(self, config: AppConfig) -> None:
-        s3_backend = S3Backend()
+        self._s3_backend = S3Backend()
         self._backend = BackendRouter(
-            (LocalBackend(), s3_backend, TransferBackend(s3_backend=s3_backend))
+            (
+                LocalBackend(),
+                self._s3_backend,
+                TransferBackend(s3_backend=self._s3_backend),
+            )
         )
         self._state = TwoPanelState(
             left=PanelState(location=config.left),
@@ -91,6 +96,10 @@ class BucketCommanderApp:
             CacheBackedBucketPanel(config.cache_root)
             if config.cache_root is not None
             else CacheBackedBucketPanel.default()
+        )
+        self._indexer = RecursiveBucketIndexer(
+            backend=self._s3_backend,
+            cache_root=self._bucket_cache.cache_root,
         )
         self._panel_focus_rows: dict[PanelId, int | None] = {
             PanelId.LEFT: None,
@@ -188,6 +197,8 @@ class BucketCommanderApp:
             self._start_move_tasks()
         elif key in {"f8", "delete"}:
             self._start_delete_tasks()
+        elif key in {"i", "I"}:
+            self._start_index_task()
         elif key in {"c", "C"}:
             self._cancel_latest_task()
         else:
@@ -213,6 +224,8 @@ class BucketCommanderApp:
             self._show_pending_command("New folder")
         elif command is UiCommand.DELETE:
             self._start_delete_tasks()
+        elif command is UiCommand.INDEX:
+            self._start_index_task()
         elif command is UiCommand.CANCEL:
             self._cancel_latest_task()
         elif command is UiCommand.QUIT:
@@ -448,6 +461,41 @@ class BucketCommanderApp:
             self._tasks.start_task(TaskType.DELETE, delete_task, source=entry.location)
             started += 1
         self._after_task_start(started, "delete")
+
+    def _start_index_task(self) -> None:
+        target = self._index_target()
+        if target is None:
+            self._update(self._state.with_status("Recursive indexing is only available for S3"))
+            return
+
+        async def index_task(
+            context: TaskContext,
+            source: S3Location = target,
+        ) -> OperationResult:
+            result = await self._indexer.index(source, progress=context.progress, resume=True)
+            return OperationResult.success(
+                f"Indexed {result.objects_indexed} objects under {source.uri}",
+                source=source,
+                entries_affected=result.objects_indexed,
+                bytes_affected=result.bytes_indexed,
+            )
+
+        self._tasks.start_task(TaskType.INDEXING, index_task, source=target)
+        self._after_task_start(1, "index")
+
+    def _index_target(self) -> S3Location | None:
+        panel = self._state.active
+        current = panel.current_entry
+        if (
+            current is not None
+            and current.name != ".."
+            and current.entry_type is EntryType.PREFIX
+            and isinstance(current.location, S3Location)
+        ):
+            return current.location
+        if isinstance(panel.location, S3Location):
+            return panel.location
+        return None
 
     def _operation_source_panel(self) -> PanelId:
         return self._state.focused

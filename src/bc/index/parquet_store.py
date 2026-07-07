@@ -268,6 +268,25 @@ class ParquetIndexStore:
             )
         )
 
+    def mark_prefix_fully_indexed(
+        self,
+        prefix: str,
+        *,
+        indexing_mode: str | None = None,
+    ) -> None:
+        manifest = self.load_manifest()
+        self.manifest_store.save(
+            manifest.with_covered_prefix(
+                prefix,
+                fully_indexed=True,
+                indexing_mode=indexing_mode,
+            )
+        )
+
+    def mark_checkpoint(self, checkpoint: str) -> None:
+        manifest = self.load_manifest()
+        self.manifest_store.save(manifest.with_checkpoint(checkpoint))
+
     def append_prefixes(
         self,
         rows: tuple[PrefixMetadata, ...],

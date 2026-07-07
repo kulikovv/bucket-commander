@@ -17,7 +17,11 @@ from bc.core import (
     parse_location,
 )
 from bc.core.task_manager import ProgressSink
+from bc.index import RecursiveIndexResult
 from bc.ui.commands import PanelId, TwoPanelState
+
+INDEXED_OBJECTS = 2
+INDEXED_BYTES = 30
 
 
 def test_operation_entries_prefer_marked_entries_over_cursor(tmp_path: Path) -> None:
@@ -147,6 +151,28 @@ class NoopBackend(Backend):
         _ = progress
         self.delete_calls.append((location, recursive))
         return OperationResult.success("deleted", source=location)
+
+
+class FakeIndexer:
+    def __init__(self) -> None:
+        self.calls: list[S3Location] = []
+
+    async def index(
+        self,
+        location: S3Location,
+        *,
+        progress: ProgressSink | None = None,
+        resume: bool = True,
+    ) -> RecursiveIndexResult:
+        _ = progress, resume
+        self.calls.append(location)
+        return RecursiveIndexResult(
+            root=location,
+            prefixes_indexed=1,
+            objects_indexed=INDEXED_OBJECTS,
+            bytes_indexed=INDEXED_BYTES,
+            checkpoint_path=Path("/tmp/checkpoint.json"),
+        )
 
 
 def test_copy_task_ignores_marked_entries_when_other_panel_is_focused(
@@ -383,5 +409,37 @@ def test_s3_refresh_writes_live_listing_to_panel_cache(tmp_path: Path) -> None:
 
         assert [entry.name for entry in app._state.left.entries] == [".."]
         assert any((tmp_path / "cache" / "indexes").rglob("*.parquet"))
+    finally:
+        app._tasks.close()
+
+
+def test_index_task_starts_for_current_s3_prefix(tmp_path: Path) -> None:
+    entry = Entry(
+        location=S3Location(bucket="bucket-commander", prefix="logs/archive/"),
+        name="archive",
+        entry_type=EntryType.PREFIX,
+    )
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    indexer = FakeIndexer()
+    app._indexer = indexer  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(
+                location=S3Location(bucket="bucket-commander", prefix="logs/"),
+                entries=(entry,),
+            ),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._start_index_task()
+
+        records = app._tasks.records()
+        assert len(records) == 1
+        assert records[0].task_type is TaskType.INDEXING
+        assert records[0].source == entry.location
+        record = wait_for_task(app._tasks, records[0].task_id)
+        assert record.result is not None
+        assert record.result.entries_affected == INDEXED_OBJECTS
+        assert indexer.calls == [entry.location]
     finally:
         app._tasks.close()

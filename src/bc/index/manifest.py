@@ -170,6 +170,40 @@ class IndexManifest:
             prefix_files=(*self.prefix_files, *files),
         )
 
+    def with_covered_prefix(
+        self,
+        prefix: str,
+        *,
+        fully_indexed: bool,
+        now: datetime | None = None,
+        indexing_mode: str | None = None,
+    ) -> IndexManifest:
+        updated = _normalize_datetime(now or datetime.now(UTC))
+        return replace(
+            self,
+            updated_at=updated,
+            indexing_history=_append_optional(self.indexing_history, indexing_mode),
+            covered_prefixes=_upsert_covered_prefix(
+                self.covered_prefixes,
+                prefix,
+                updated,
+                fully_indexed=fully_indexed,
+            ),
+        )
+
+    def with_checkpoint(
+        self,
+        checkpoint: str,
+        *,
+        now: datetime | None = None,
+    ) -> IndexManifest:
+        updated = _normalize_datetime(now or datetime.now(UTC))
+        return replace(
+            self,
+            updated_at=updated,
+            last_successful_checkpoint=checkpoint,
+        )
+
     def to_json(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -258,7 +292,12 @@ def _upsert_covered_prefix(
     normalized = prefix.strip("/")
     if normalized:
         normalized = f"{normalized}/"
-    replacement = CoveredPrefix(prefix=normalized, listed_at=listed_at, fully_indexed=fully_indexed)
+    replacement = CoveredPrefix(
+        prefix=normalized,
+        listed_at=listed_at,
+        fully_indexed=fully_indexed,
+        recursive_indexed_at=listed_at if fully_indexed else None,
+    )
     return (*tuple(value for value in values if value.prefix != normalized), replacement)
 
 

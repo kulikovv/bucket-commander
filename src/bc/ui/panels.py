@@ -28,6 +28,7 @@ COMMAND_BUTTONS = (
     ("Move", "move"),
     ("New Folder", "new_folder"),
     ("Delete", "delete"),
+    ("Index", "index"),
     ("Cancel", "cancel"),
     ("Quit", "quit"),
 )
@@ -45,6 +46,7 @@ HELP_COMMANDS = (
     ("F6", "Move selected entries"),
     ("F7", "Create a new folder"),
     ("F8 or Delete", "Delete selected entries"),
+    ("I", "Index current bucket or prefix recursively"),
     ("C", "Cancel active task"),
     ("Q", "Quit Bucket Commander"),
 )
@@ -58,8 +60,7 @@ class PanelMouseHandler(Protocol):
         *,
         toggle_mark: bool = False,
         viewport_row: int | None = None,
-    ) -> object:
-        ...
+    ) -> object: ...
 
 
 class UiCommand(StrEnum):
@@ -74,6 +75,7 @@ class UiCommand(StrEnum):
     MOVE = "move"
     NEW_FOLDER = "new_folder"
     DELETE = "delete"
+    INDEX = "index"
     CANCEL = "cancel"
     QUIT = "quit"
 
