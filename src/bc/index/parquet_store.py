@@ -253,6 +253,21 @@ class ParquetIndexStore:
         )
         return tuple(self.index_dir / file.path for file in written_files)
 
+    def mark_prefix_listed(
+        self,
+        prefix: str,
+        *,
+        indexing_mode: str | None = None,
+    ) -> None:
+        manifest = self.load_manifest()
+        self.manifest_store.save(
+            manifest.with_object_files(
+                (),
+                covered_prefix=prefix,
+                indexing_mode=indexing_mode,
+            )
+        )
+
     def append_prefixes(
         self,
         rows: tuple[PrefixMetadata, ...],

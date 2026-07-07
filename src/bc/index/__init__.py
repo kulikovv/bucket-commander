@@ -7,6 +7,7 @@ from bc.index.manifest import (
     IndexManifest,
     ManifestStore,
 )
+from bc.index.panel_cache import CacheBackedBucketPanel, CachedPanelListing, default_cache_root
 from bc.index.parquet_store import (
     OBJECT_SCHEMA,
     PREFIX_SCHEMA,
@@ -20,6 +21,8 @@ __all__ = [
     "INDEX_SCHEMA_VERSION",
     "OBJECT_SCHEMA",
     "PREFIX_SCHEMA",
+    "CacheBackedBucketPanel",
+    "CachedPanelListing",
     "CoveredPrefix",
     "CurrentPrefixListing",
     "IndexFile",
@@ -28,4 +31,5 @@ __all__ = [
     "ObjectMetadata",
     "ParquetIndexStore",
     "PrefixMetadata",
+    "default_cache_root",
 ]

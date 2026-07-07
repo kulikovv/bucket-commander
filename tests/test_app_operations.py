@@ -99,6 +99,7 @@ class NoopBackend(Backend):
 
     def __init__(self) -> None:
         self.delete_calls: list[tuple[Location, bool]] = []
+        self.list_entries: tuple[Entry, ...] = ()
 
     def supports(self, location: Location) -> bool:
         _ = location
@@ -106,7 +107,7 @@ class NoopBackend(Backend):
 
     async def list(self, location: Location) -> tuple[Entry, ...]:
         _ = location
-        return ()
+        return self.list_entries
 
     async def stat(self, location: Location) -> Entry:
         return Entry(location=location, name=location.name, entry_type=EntryType.FILE)
@@ -341,5 +342,46 @@ def test_view_current_entry_opens_preview_dialog(tmp_path: Path) -> None:
         app._view_current_entry()
 
         assert app._view_dialog == ("document.txt", "hello")
+    finally:
+        app._tasks.close()
+
+
+def test_s3_refresh_writes_live_listing_to_panel_cache(tmp_path: Path) -> None:
+    location = S3Location(
+        bucket="bucket-commander",
+        prefix="logs/",
+        profile="dev",
+        region="us-east-1",
+        endpoint_url="http://localhost:9000",
+    )
+    live_entry = Entry(
+        location=S3Location(
+            bucket="bucket-commander",
+            prefix="logs/a.txt",
+            profile="dev",
+            region="us-east-1",
+            endpoint_url="http://localhost:9000",
+        ),
+        name="a.txt",
+        entry_type=EntryType.OBJECT,
+        size=12,
+    )
+    app = BucketCommanderApp(
+        AppConfig(left=location, right=parse_location(tmp_path), cache_root=tmp_path / "cache")
+    )
+    backend = NoopBackend()
+    backend.list_entries = (live_entry,)
+    app._backend = backend  # type: ignore[assignment]
+    try:
+        app._refresh_panel(PanelId.LEFT)
+
+        assert [entry.name for entry in app._state.left.entries] == ["..", "a.txt"]
+        assert "live entries" in app._state.status_message
+
+        backend.list_entries = ()
+        app._refresh_panel(PanelId.LEFT)
+
+        assert [entry.name for entry in app._state.left.entries] == [".."]
+        assert any((tmp_path / "cache" / "indexes").rglob("*.parquet"))
     finally:
         app._tasks.close()

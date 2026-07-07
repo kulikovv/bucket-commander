@@ -70,8 +70,10 @@ def focus_panel_item(
         if entry is None:
             return state.with_panel(panel_id, focused_panel).with_status("No entry selected")
         action = "Selected" if entry.uri in focused_panel.selected_uris else "Unselected"
-        return replace(state, focused=panel_id).with_panel(panel_id, focused_panel).with_status(
-            f"{action} {entry.name}"
+        return (
+            replace(state, focused=panel_id)
+            .with_panel(panel_id, focused_panel)
+            .with_status(f"{action} {entry.name}")
         )
     entry = focused_panel.current_entry
     message = f"Focused {entry.name}" if entry is not None else "No entry selected"
@@ -100,7 +102,7 @@ async def refresh(
     panel = state.panel(panel_id)
     loading_panel = replace(panel, is_loading=True, status_message="Loading")
     loading_state = state.with_panel(panel_id, loading_panel)
-    entries = _with_parent_entry(panel.location, await backend.list(panel.location))
+    entries = with_parent_entry(panel.location, await backend.list(panel.location))
     refreshed_panel = replace(
         loading_panel,
         entries=entries,
@@ -139,7 +141,7 @@ async def go_parent(state: TwoPanelState, backend: Backend) -> TwoPanelState:
     return await refresh(next_state, state.focused, backend)
 
 
-def _with_parent_entry(location: object, entries: tuple[Entry, ...]) -> tuple[Entry, ...]:
+def with_parent_entry(location: object, entries: tuple[Entry, ...]) -> tuple[Entry, ...]:
     if not isinstance(location, (LocalLocation, S3Location)):
         return entries
     parent = location.parent()

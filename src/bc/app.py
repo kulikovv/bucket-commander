@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from dataclasses import replace as field_replace
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +18,14 @@ from bc.core import (
     Entry,
     OperationResult,
     PanelState,
+    S3Location,
     TaskContext,
     TaskManager,
     TaskState,
     TaskType,
 )
 from bc.core.locations import Location, parse_location
+from bc.index import CacheBackedBucketPanel
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -34,6 +37,7 @@ from bc.ui.commands import (
     refresh,
     switch_focus,
     toggle_selection,
+    with_parent_entry,
 )
 from bc.ui.panels import (
     UiCommand,
@@ -59,6 +63,7 @@ class AppConfig:
     left: Location
     right: Location
     sources: SourcesConfig = field(default_factory=SourcesConfig)
+    cache_root: Path | None = None
 
     @classmethod
     def from_paths(cls, *, left: Path, right: Path) -> AppConfig:
@@ -82,6 +87,11 @@ class BucketCommanderApp:
         self._view_dialog: tuple[str, str] | None = None
         self._location_picker_panel: PanelId | None = None
         self._sources = _with_builtin_sources(config.sources.sources)
+        self._bucket_cache = (
+            CacheBackedBucketPanel(config.cache_root)
+            if config.cache_root is not None
+            else CacheBackedBucketPanel.default()
+        )
         self._panel_focus_rows: dict[PanelId, int | None] = {
             PanelId.LEFT: None,
             PanelId.RIGHT: None,
@@ -244,7 +254,65 @@ class BucketCommanderApp:
         )
 
     def _refresh_panel(self, panel_id: PanelId) -> None:
+        panel = self._state.panel(panel_id)
+        if isinstance(panel.location, S3Location):
+            self._refresh_s3_panel(panel_id, panel.location)
+            return
         self._run_command(lambda: refresh(self._state, panel_id, self._backend))
+
+    def _refresh_s3_panel(self, panel_id: PanelId, location: S3Location) -> None:
+        try:
+            cached = asyncio.run(self._bucket_cache.load_cached(location))
+        except BackendError as error:
+            self._update(self._state.with_status(str(error)))
+            return
+        except (OSError, ValueError, TypeError) as error:
+            cached = None
+            self._update(
+                self._state.with_status(f"Ignoring damaged cache for {location.label}: {error}")
+            )
+        if cached is not None and cached.has_cache:
+            panel = self._state.panel(panel_id)
+            cached_entries = with_parent_entry(location, cached.entries)
+            cached_panel = panel.with_entries(cached_entries)
+            cached_panel = field_replace(
+                cached_panel,
+                is_loading=True,
+                status_message=cached.status,
+                cursor_index=min(panel.cursor_index, max(0, len(cached_entries) - 1)),
+            )
+            self._update(
+                self._state.with_panel(panel_id, cached_panel).with_status(
+                    f"{location.label}: {cached.status}"
+                )
+            )
+        self._run_command(lambda: self._refresh_s3_panel_live(panel_id, location))
+
+    async def _refresh_s3_panel_live(
+        self,
+        panel_id: PanelId,
+        location: S3Location,
+    ) -> TwoPanelState:
+        panel = self._state.panel(panel_id)
+        loading_panel = field_replace(panel, is_loading=True, status_message="Loading live")
+        loading_state = self._state.with_panel(panel_id, loading_panel)
+        live_entries = await self._backend.list(location)
+        cache_status = "cached fresh"
+        try:
+            await self._bucket_cache.store_live_listing(location, live_entries)
+        except (OSError, ValueError, TypeError) as error:
+            cache_status = f"cache update failed: {error}"
+        entries = with_parent_entry(location, live_entries)
+        refreshed_panel = field_replace(
+            loading_panel,
+            entries=entries,
+            cursor_index=min(loading_panel.cursor_index, max(0, len(entries) - 1)),
+            is_loading=False,
+            status_message=f"{len(entries)} entries",
+        )
+        return loading_state.with_panel(panel_id, refreshed_panel).with_status(
+            f"{location.label}: {len(entries)} live entries ({cache_status})"
+        )
 
     def _show_pending_command(self, command_name: str) -> None:
         self._update(self._state.with_status(f"{command_name} is not implemented yet"))

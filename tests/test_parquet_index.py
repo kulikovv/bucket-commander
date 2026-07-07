@@ -1,10 +1,17 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from bc.core import EntryType
-from bc.index import OBJECT_SCHEMA, ObjectMetadata, ParquetIndexStore, PrefixMetadata
+from bc.core import Entry, EntryType, S3Location
+from bc.index import (
+    OBJECT_SCHEMA,
+    CacheBackedBucketPanel,
+    ObjectMetadata,
+    ParquetIndexStore,
+    PrefixMetadata,
+)
 
 EXPECTED_APPENDED_OBJECT_FILES = 2
 
@@ -88,9 +95,7 @@ def test_append_objects_writes_parquet_and_manifest_tracks_active_files(tmp_path
     assert manifest.indexing_history == ("on-demand",)
 
     table = pq.read_table(files[0])  # type: ignore[no-untyped-call]
-    stored_column_names = [
-        name for name in table.column_names if name != "partition_prefix_hash"
-    ]
+    stored_column_names = [name for name in table.column_names if name != "partition_prefix_hash"]
 
     assert stored_column_names == OBJECT_SCHEMA.names
     assert stored_column_names[:6] == [
@@ -154,3 +159,72 @@ def test_query_is_limited_to_direct_parent_prefix(tmp_path: Path) -> None:
     listing = store.read_current_prefix("logs/")
 
     assert [row.key for row in listing.objects] == ["logs/a.txt"]
+
+
+def test_cache_backed_panel_persists_live_listing_and_loads_cached_entries(
+    tmp_path: Path,
+) -> None:
+    cache = CacheBackedBucketPanel(tmp_path / "cache")
+    location = S3Location(
+        bucket="example-bucket",
+        prefix="logs/",
+        profile="dev-profile",
+        region="us-east-1",
+        endpoint_url="http://localhost:9000",
+    )
+    live_entries = (
+        Entry(
+            location=S3Location(
+                bucket="example-bucket",
+                prefix="logs/archive/",
+                profile="dev-profile",
+                region="us-east-1",
+                endpoint_url="http://localhost:9000",
+            ),
+            name="archive",
+            entry_type=EntryType.PREFIX,
+        ),
+        Entry(
+            location=S3Location(
+                bucket="example-bucket",
+                prefix="logs/a.txt",
+                profile="dev-profile",
+                region="us-east-1",
+                endpoint_url="http://localhost:9000",
+            ),
+            name="a.txt",
+            entry_type=EntryType.OBJECT,
+            size=15,
+            modified_at=datetime(2026, 1, 1, tzinfo=UTC),
+            etag="etag-a",
+        ),
+    )
+
+    asyncio.run(cache.store_live_listing(location, live_entries))
+    cached = asyncio.run(cache.load_cached(location))
+
+    assert cached.has_cache
+    assert cached.is_partial
+    assert not cached.is_stale
+    assert "2 cached entries" in cached.status
+    assert [(entry.name, entry.entry_type) for entry in cached.entries] == [
+        ("archive", EntryType.PREFIX),
+        ("a.txt", EntryType.OBJECT),
+    ]
+    assert {
+        entry.location.endpoint_url
+        for entry in cached.entries
+        if isinstance(entry.location, S3Location)
+    } == {"http://localhost:9000"}
+
+
+def test_cache_backed_panel_marks_empty_live_listing_as_cached(tmp_path: Path) -> None:
+    cache = CacheBackedBucketPanel(tmp_path / "cache")
+    location = S3Location(bucket="example-bucket", prefix="empty/")
+
+    asyncio.run(cache.store_live_listing(location, ()))
+    cached = asyncio.run(cache.load_cached(location))
+
+    assert cached.has_cache
+    assert cached.entries == ()
+    assert "0 cached entries" in cached.status
