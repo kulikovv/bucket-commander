@@ -1,4 +1,5 @@
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bc.app import AppConfig, BucketCommanderApp
@@ -18,10 +19,36 @@ from bc.core import (
 )
 from bc.core.task_manager import ProgressSink
 from bc.index import RecursiveIndexResult
+from bc.index.cache_paths import account_id, index_dir
+from bc.index.parquet_store import ObjectMetadata, ParquetIndexStore
 from bc.ui.commands import PanelId, TwoPanelState
 
 INDEXED_OBJECTS = 2
 INDEXED_BYTES = 30
+
+
+def indexed_object_row(
+    key: str,
+    *,
+    parent_prefix: str,
+    name: str,
+    size: int,
+    bucket: str,
+) -> ObjectMetadata:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    return ObjectMetadata(
+        provider="s3",
+        account_id="default",
+        bucket=bucket,
+        key=key,
+        parent_prefix=parent_prefix,
+        name=name,
+        size=size,
+        last_modified=timestamp,
+        discovered_at=timestamp,
+        refreshed_at=timestamp,
+        source_listing_id="test",
+    )
 
 
 def test_operation_entries_prefer_marked_entries_over_cursor(tmp_path: Path) -> None:
@@ -104,13 +131,14 @@ class NoopBackend(Backend):
     def __init__(self) -> None:
         self.delete_calls: list[tuple[Location, bool]] = []
         self.list_entries: tuple[Entry, ...] = ()
+        self.list_calls: list[Location] = []
 
     def supports(self, location: Location) -> bool:
         _ = location
         return True
 
     async def list(self, location: Location) -> tuple[Entry, ...]:
-        _ = location
+        self.list_calls.append(location)
         return self.list_entries
 
     async def stat(self, location: Location) -> Entry:
@@ -441,5 +469,152 @@ def test_index_task_starts_for_current_s3_prefix(tmp_path: Path) -> None:
         assert record.result is not None
         assert record.result.entries_affected == INDEXED_OBJECTS
         assert indexer.calls == [entry.location]
+    finally:
+        app._tasks.close()
+
+
+def test_indexed_search_uses_cache_without_remote_listing(tmp_path: Path) -> None:
+    cache_root = tmp_path / "cache"
+    location = S3Location(bucket="bucket-commander", prefix="logs/", region="us-east-1")
+    store = ParquetIndexStore.open(
+        index_dir(cache_root, location),
+        provider="s3",
+        account_id=account_id(location),
+        bucket=location.bucket,
+        region=location.region,
+    )
+    store.append_objects(
+        (
+            indexed_object_row(
+                "logs/error.txt",
+                parent_prefix="logs/",
+                name="error.txt",
+                size=12,
+                bucket=location.bucket,
+            ),
+            indexed_object_row(
+                "logs/info.txt",
+                parent_prefix="logs/",
+                name="info.txt",
+                size=8,
+                bucket=location.bucket,
+            ),
+        ),
+        covered_prefix="logs/",
+    )
+    app = BucketCommanderApp(
+        AppConfig(left=location, right=parse_location(tmp_path), cache_root=cache_root)
+    )
+    backend = NoopBackend()
+    app._backend = backend  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=location),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._apply_indexed_search(PanelId.LEFT, "error")
+
+        assert [entry.name for entry in app._state.left.entries] == ["..", "error.txt"]
+        assert "indexed result" in app._state.status_message
+        assert backend.list_calls == []
+    finally:
+        app._tasks.close()
+
+
+def test_indexed_search_rejects_empty_query(tmp_path: Path) -> None:
+    location = S3Location(bucket="bucket-commander", prefix="logs/", region="us-east-1")
+    app = BucketCommanderApp(
+        AppConfig(left=location, right=parse_location(tmp_path), cache_root=tmp_path / "cache")
+    )
+    backend = NoopBackend()
+    app._backend = backend  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=location),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._apply_indexed_search(PanelId.LEFT, "")
+
+        assert app._state.status_message == "Search query must not be empty"
+        assert app._state.left.entries == ()
+        assert backend.list_calls == []
+    finally:
+        app._tasks.close()
+
+
+def test_parent_entry_leaves_indexed_search_mode(tmp_path: Path) -> None:
+    location = S3Location(bucket="bucket-commander", prefix="logs/", region="us-east-1")
+    parent = Entry(
+        location=S3Location(bucket="bucket-commander"),
+        name="..",
+        entry_type=EntryType.PREFIX,
+    )
+    search_result = Entry(
+        location=S3Location(bucket="bucket-commander", prefix="logs/error.txt"),
+        name="error.txt",
+        entry_type=EntryType.OBJECT,
+    )
+    live_entry = Entry(
+        location=S3Location(bucket="bucket-commander", prefix="logs/live.txt"),
+        name="live.txt",
+        entry_type=EntryType.OBJECT,
+    )
+    app = BucketCommanderApp(
+        AppConfig(left=location, right=parse_location(tmp_path), cache_root=tmp_path / "cache")
+    )
+    backend = NoopBackend()
+    backend.list_entries = (live_entry,)
+    app._backend = backend  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(
+                location=location,
+                entries=(parent, search_result),
+                filter_text="error",
+            ),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._enter_active()
+
+        assert app._state.left.location == location
+        assert app._state.left.filter_text == ""
+        assert [entry.name for entry in app._state.left.entries] == ["..", "live.txt"]
+        assert backend.list_calls == [location]
+    finally:
+        app._tasks.close()
+
+
+def test_backslash_leaves_indexed_search_mode(tmp_path: Path) -> None:
+    location = S3Location(bucket="bucket-commander", prefix="logs/", region="us-east-1")
+    live_entry = Entry(
+        location=S3Location(bucket="bucket-commander", prefix="logs/live.txt"),
+        name="live.txt",
+        entry_type=EntryType.OBJECT,
+    )
+    app = BucketCommanderApp(
+        AppConfig(left=location, right=parse_location(tmp_path), cache_root=tmp_path / "cache")
+    )
+    backend = NoopBackend()
+    backend.list_entries = (live_entry,)
+    app._backend = backend  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(
+                location=location,
+                entries=(live_entry,),
+                filter_text="live",
+            ),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._handle_key("\\")
+
+        assert app._state.left.location == location
+        assert app._state.left.filter_text == ""
+        assert [entry.name for entry in app._state.left.entries] == ["..", "live.txt"]
+        assert backend.list_calls == [location]
     finally:
         app._tasks.close()

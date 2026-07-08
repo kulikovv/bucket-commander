@@ -11,6 +11,7 @@ from bc.ui.panels import (
     render_app,
     render_help_overlay,
     render_location_picker_overlay,
+    render_search_overlay,
     render_view_overlay,
 )
 
@@ -25,6 +26,8 @@ def test_render_app_includes_help_button(tmp_path: Path) -> None:
 
     assert "< Help" in rendered
     assert "< View" in rendered
+    assert "< Search" in rendered
+    assert "< Sort" in rendered
     assert "< Copy" in rendered
     assert "< Move" in rendered
     assert "< Delete" in rendered
@@ -221,6 +224,21 @@ def test_render_help_overlay_lists_commands(tmp_path: Path) -> None:
     assert "Commands" in rendered
     assert "F1 or ?" in rendered
     assert "Refresh active panel" in rendered
+    assert "Search indexed bucket metadata" in rendered
+    assert "< Close" in rendered
+
+
+def test_render_search_overlay_shows_query(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(render_search_overlay(render_app(state), query="error"))
+
+    assert "Indexed Search" in rendered
+    assert "Query: error" in rendered
+    assert "< Search" in rendered
     assert "< Close" in rendered
 
 

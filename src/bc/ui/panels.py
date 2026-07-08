@@ -23,6 +23,8 @@ SECONDARY_MOUSE_BUTTON = 3
 COMMAND_BUTTONS = (
     ("Help", "help"),
     ("View", "view"),
+    ("Search", "search"),
+    ("Sort", "sort"),
     ("New File", "new_file"),
     ("Copy", "copy"),
     ("Move", "move"),
@@ -37,10 +39,13 @@ HELP_COMMANDS = (
     ("Tab", "Switch active panel"),
     ("Up/Down", "Move cursor"),
     ("Enter, Space, Right", "Open directory or prefix"),
-    ("Backspace, Left", "Go to parent"),
+    ("Backspace, Left", "Go to parent or leave search"),
     ("S", "Toggle selection"),
     ("R or Ctrl-R", "Refresh active panel"),
     ("F3", "View selected entry"),
+    ("/", "Search indexed bucket metadata"),
+    ("\\", "Leave indexed search"),
+    ("O", "Cycle sort field"),
     ("F4", "Create a new file"),
     ("F5", "Copy selected entries"),
     ("F6", "Move selected entries"),
@@ -68,6 +73,8 @@ class UiCommand(StrEnum):
 
     HELP = "help"
     VIEW = "view"
+    SEARCH = "search"
+    SORT = "sort"
     NEW_FILE = "new_file"
     SELECT = "select"
     REFRESH = "refresh"
@@ -202,6 +209,42 @@ def render_view_overlay(
         width=("relative", 78),
         valign="middle",
         height=("relative", 72),
+    )
+
+
+def render_search_overlay(
+    base: urwid.Widget,
+    *,
+    query: str,
+    on_apply: Callable[[urwid.Button], object] | None = None,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place an indexed search prompt over the current application."""
+
+    content = urwid.Pile(
+        [
+            ("pack", urwid.Text(f" Query: {query or '<type a search query>'}", wrap="clip")),
+            ("pack", urwid.Divider()),
+            (
+                "pack",
+                urwid.Columns(
+                    [
+                        ("given", 14, urwid.Button("Search", on_press=on_apply)),
+                        ("given", 14, urwid.Button("Close", on_press=on_close)),
+                    ],
+                    dividechars=2,
+                ),
+            ),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content, title=" Indexed Search "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 64),
+        valign="middle",
+        height="pack",
     )
 
 
@@ -410,9 +453,14 @@ def render_panel(
     """Render a single file panel."""
 
     status = " loading" if panel.is_loading else ""
+    filter_status = f" search:{panel.filter_text}" if panel.filter_text else ""
+    sort_status = f" sort:{panel.sort_field.value}/{panel.sort_order.value[:3]}"
     header = urwid.AttrMap(
         urwid.Text(
-            f" {title}: {panel.location.label}{status} [{len(panel.selected_entries)} marked]",
+            (
+                f" {title}: {panel.location.label}{status}{filter_status}{sort_status} "
+                f"[{len(panel.selected_entries)} marked]"
+            ),
             wrap="clip",
         ),
         "panel_header",

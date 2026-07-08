@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from dataclasses import replace as field_replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +21,21 @@ from bc.core import (
     OperationResult,
     PanelState,
     S3Location,
+    SortField,
+    SortOrder,
     TaskContext,
     TaskManager,
     TaskState,
     TaskType,
 )
 from bc.core.locations import Location, parse_location
-from bc.index import CacheBackedBucketPanel, RecursiveBucketIndexer
+from bc.index import (
+    DEFAULT_QUERY_LIMIT,
+    CacheBackedBucketPanel,
+    IndexedBucketQuery,
+    RecursiveBucketIndexer,
+    parse_indexed_search_query,
+)
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -45,6 +54,7 @@ from bc.ui.panels import (
     render_app,
     render_help_overlay,
     render_location_picker_overlay,
+    render_search_overlay,
     render_view_overlay,
 )
 
@@ -91,6 +101,8 @@ class BucketCommanderApp:
         self._is_help_open = False
         self._view_dialog: tuple[str, str] | None = None
         self._location_picker_panel: PanelId | None = None
+        self._search_panel: PanelId | None = None
+        self._search_text = ""
         self._sources = _with_builtin_sources(config.sources.sources)
         self._bucket_cache = (
             CacheBackedBucketPanel(config.cache_root)
@@ -101,6 +113,7 @@ class BucketCommanderApp:
             backend=self._s3_backend,
             cache_root=self._bucket_cache.cache_root,
         )
+        self._bucket_query = IndexedBucketQuery(self._bucket_cache.cache_root)
         self._panel_focus_rows: dict[PanelId, int | None] = {
             PanelId.LEFT: None,
             PanelId.RIGHT: None,
@@ -145,6 +158,7 @@ class BucketCommanderApp:
         return (
             self._handle_help_key(key)
             or self._handle_view_key(key)
+            or self._handle_search_key(key)
             or self._handle_location_picker_key(key)
         )
 
@@ -156,13 +170,19 @@ class BucketCommanderApp:
         elif key == "down":
             self._update(move_cursor(self._state, 1))
         elif key in {"enter", " ", "right"}:
-            self._run_command(lambda: enter(self._state, self._backend))
+            self._enter_active()
         elif key in {"s", "S"}:
             self._update(toggle_selection(self._state))
-        elif key in {"backspace", "left"}:
+        elif key in {"backspace", "left", "\\"}:
+            if self._leave_search_mode(self._state.focused):
+                return True
             self._run_command(lambda: go_parent(self._state, self._backend))
         elif key in {"r", "R", "ctrl r"}:
             self._refresh_panel(self._state.focused)
+        elif key == "/":
+            self._show_search_dialog()
+        elif key in {"o", "O"}:
+            self._cycle_sort()
         else:
             return False
         return True
@@ -179,6 +199,21 @@ class BucketCommanderApp:
             return False
         if key in {"q", "Q", "esc", "enter", "f3"}:
             self._close_view_dialog()
+        return True
+
+    def _handle_search_key(self, key: str) -> bool:
+        if self._search_panel is None:
+            return False
+        if key in {"esc", "q"}:
+            self._close_search_dialog()
+        elif key == "enter":
+            self._apply_search_dialog()
+        elif key == "backspace":
+            self._search_text = self._search_text[:-1]
+            self._redraw()
+        elif len(key) == 1 and key.isprintable():
+            self._search_text = f"{self._search_text}{key}"
+            self._redraw()
         return True
 
     def _handle_location_picker_key(self, key: str) -> bool:
@@ -206,30 +241,24 @@ class BucketCommanderApp:
         return True
 
     def _handle_ui_command(self, command: UiCommand) -> None:
-        if command is UiCommand.HELP:
-            self._show_help_dialog()
-        elif command is UiCommand.VIEW:
-            self._view_current_entry()
-        elif command is UiCommand.NEW_FILE:
-            self._show_pending_command("New file")
-        elif command is UiCommand.SELECT:
-            self._update(toggle_selection(self._state))
-        elif command is UiCommand.REFRESH:
-            self._refresh_panel(self._state.focused)
-        elif command is UiCommand.COPY:
-            self._start_copy_tasks()
-        elif command is UiCommand.MOVE:
-            self._start_move_tasks()
-        elif command is UiCommand.NEW_FOLDER:
-            self._show_pending_command("New folder")
-        elif command is UiCommand.DELETE:
-            self._start_delete_tasks()
-        elif command is UiCommand.INDEX:
-            self._start_index_task()
-        elif command is UiCommand.CANCEL:
-            self._cancel_latest_task()
-        elif command is UiCommand.QUIT:
+        if command is UiCommand.QUIT:
             raise urwid.ExitMainLoop()
+        handlers: dict[UiCommand, Callable[[], None]] = {
+            UiCommand.HELP: self._show_help_dialog,
+            UiCommand.VIEW: self._view_current_entry,
+            UiCommand.SEARCH: self._show_search_dialog,
+            UiCommand.SORT: self._cycle_sort,
+            UiCommand.NEW_FILE: lambda: self._show_pending_command("New file"),
+            UiCommand.SELECT: lambda: self._update(toggle_selection(self._state)),
+            UiCommand.REFRESH: lambda: self._refresh_panel(self._state.focused),
+            UiCommand.COPY: self._start_copy_tasks,
+            UiCommand.MOVE: self._start_move_tasks,
+            UiCommand.NEW_FOLDER: lambda: self._show_pending_command("New folder"),
+            UiCommand.DELETE: self._start_delete_tasks,
+            UiCommand.INDEX: self._start_index_task,
+            UiCommand.CANCEL: self._cancel_latest_task,
+        }
+        handlers[command]()
 
     def _handle_panel_mouse(
         self,
@@ -253,7 +282,7 @@ class BucketCommanderApp:
         self._last_mouse_click = (panel_id, clicked_entry.uri, time.monotonic())
         if is_double_click and (clicked_entry.name == ".." or clicked_entry.is_container):
             self._last_mouse_click = None
-            self._run_command(lambda: enter(self._state, self._backend))
+            self._enter_active()
 
     def _is_double_click(self, panel_id: PanelId, entry: Entry) -> bool:
         last_click = self._last_mouse_click
@@ -342,6 +371,23 @@ class BucketCommanderApp:
         self._view_dialog = None
         self._redraw()
 
+    def _show_search_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._search_panel = self._state.focused
+        self._search_text = self._state.active.filter_text
+        self._redraw()
+
+    def _close_search_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._search_panel = None
+        self._redraw()
+
+    def _apply_search_dialog(self, _button: urwid.Button | None = None) -> None:
+        panel_id = self._search_panel
+        if panel_id is None:
+            return
+        query = self._search_text.strip()
+        self._search_panel = None
+        self._apply_indexed_search(panel_id, query)
+
     def _show_location_picker(self, panel_id: PanelId) -> None:
         self._location_picker_panel = panel_id
         self._redraw()
@@ -379,6 +425,16 @@ class BucketCommanderApp:
             text = f"{text}\n\n[truncated at {VIEW_MAX_BYTES} bytes]"
         self._view_dialog = (entry.name, text)
         self._redraw()
+
+    def _enter_active(self) -> None:
+        panel = self._state.active
+        if (
+            panel.current_entry is not None
+            and panel.current_entry.name == ".."
+            and self._leave_search_mode(self._state.focused)
+        ):
+            return
+        self._run_command(lambda: enter(self._state, self._backend))
 
     def _start_copy_tasks(self) -> None:
         source_panel = self._operation_source_panel()
@@ -497,6 +553,77 @@ class BucketCommanderApp:
             return panel.location
         return None
 
+    def _apply_indexed_search(self, panel_id: PanelId, query: str) -> None:
+        if not query:
+            self._update(self._state.with_status("Search query must not be empty"))
+            return
+        panel = self._state.panel(panel_id)
+        if not isinstance(panel.location, S3Location):
+            self._update(self._state.with_status("Indexed search is only available for S3"))
+            return
+        try:
+            result = asyncio.run(
+                self._bucket_query.search(
+                    panel.location,
+                    criteria=parse_indexed_search_query(query),
+                    sort_field=panel.sort_field,
+                    sort_order=panel.sort_order,
+                    limit=DEFAULT_QUERY_LIMIT,
+                )
+            )
+        except (OSError, ValueError, TypeError) as error:
+            self._update(self._state.with_status(f"Indexed search failed: {error}"))
+            return
+        entries = with_parent_entry(panel.location, result.entries)
+        searched_panel = field_replace(
+            panel.with_entries(entries),
+            filter_text=query,
+            cursor_index=0,
+            status_message=f"{result.total_count} indexed result(s)",
+        )
+        page_note = "" if result.total_count <= result.limit else f", first {result.limit}"
+        self._update(
+            self._state.with_panel(panel_id, searched_panel).with_status(
+                f"{panel.location.label}: {result.total_count} indexed result(s)"
+                f"{page_note}; {result.coverage_message}"
+            )
+        )
+
+    def _leave_search_mode(self, panel_id: PanelId) -> bool:
+        panel = self._state.panel(panel_id)
+        if not panel.filter_text:
+            return False
+        restored_panel = field_replace(
+            PanelState(
+                location=panel.location,
+                sort_field=panel.sort_field,
+                sort_order=panel.sort_order,
+            ),
+            status_message="Leaving search",
+        )
+        self._state = self._state.with_panel(panel_id, restored_panel).with_status(
+            f"{panel.location.label}: leaving indexed search"
+        )
+        self._refresh_panel(panel_id)
+        return True
+
+    def _cycle_sort(self) -> None:
+        panel_id = self._state.focused
+        panel = self._state.active
+        next_field, next_order = _next_sort(panel.sort_field, panel.sort_order)
+        sorted_panel = field_replace(panel, sort_field=next_field, sort_order=next_order)
+        self._state = self._state.with_panel(panel_id, sorted_panel)
+        if isinstance(sorted_panel.location, S3Location) and sorted_panel.filter_text:
+            self._apply_indexed_search(panel_id, sorted_panel.filter_text)
+            return
+        entries = _sort_entries(sorted_panel.entries, next_field, next_order)
+        self._update(
+            self._state.with_panel(
+                panel_id,
+                field_replace(sorted_panel.with_entries(entries), cursor_index=0),
+            ).with_status(f"Sorted by {next_field.value} {next_order.value}")
+        )
+
     def _operation_source_panel(self) -> PanelId:
         return self._state.focused
 
@@ -564,6 +691,13 @@ class BucketCommanderApp:
                 content=content,
                 on_close=self._close_view_dialog,
             )
+        if self._search_panel is not None:
+            return render_search_overlay(
+                app,
+                query=self._search_text,
+                on_apply=self._apply_search_dialog,
+                on_close=self._close_search_dialog,
+            )
         if self._location_picker_panel is not None:
             return render_location_picker_overlay(
                 app,
@@ -616,6 +750,47 @@ def _with_builtin_sources(sources: tuple[KnownSource, ...]) -> tuple[KnownSource
         credential_source="local",
     )
     return (local_source, *sources)
+
+
+def _next_sort(current: SortField, order: SortOrder) -> tuple[SortField, SortOrder]:
+    fields = (
+        SortField.NAME,
+        SortField.TYPE,
+        SortField.SIZE,
+        SortField.MODIFIED_AT,
+    )
+    if order is SortOrder.ASCENDING:
+        return current, SortOrder.DESCENDING
+    index = fields.index(current)
+    return fields[(index + 1) % len(fields)], SortOrder.ASCENDING
+
+
+def _sort_entries(
+    entries: tuple[Entry, ...],
+    sort_field: SortField,
+    sort_order: SortOrder,
+) -> tuple[Entry, ...]:
+    parent = tuple(entry for entry in entries if entry.name == "..")
+    sortable = tuple(entry for entry in entries if entry.name != "..")
+    reverse = sort_order is SortOrder.DESCENDING
+    return (
+        *parent,
+        *sorted(sortable, key=lambda entry: _sort_key(entry, sort_field), reverse=reverse),
+    )
+
+
+def _sort_key(entry: Entry, sort_field: SortField) -> tuple[object, ...]:
+    if sort_field is SortField.TYPE:
+        return (entry.entry_type.value, entry.name.casefold())
+    if sort_field is SortField.SIZE:
+        return (entry.size is None, entry.size or 0, entry.name.casefold())
+    if sort_field is SortField.MODIFIED_AT:
+        return (
+            entry.modified_at is None,
+            entry.modified_at or datetime.min,
+            entry.name.casefold(),
+        )
+    return (entry.name.casefold(),)
 
 
 def _palette() -> list[tuple[str, str, str]]:

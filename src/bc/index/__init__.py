@@ -23,8 +23,16 @@ from bc.index.parquet_store import (
     ParquetIndexStore,
     PrefixMetadata,
 )
+from bc.index.query import (
+    DEFAULT_QUERY_LIMIT,
+    IndexedBucketQuery,
+    IndexedSearchCriteria,
+    IndexedSearchResult,
+    parse_indexed_search_query,
+)
 
 __all__ = [
+    "DEFAULT_QUERY_LIMIT",
     "INDEX_SCHEMA_VERSION",
     "OBJECT_SCHEMA",
     "PREFIX_SCHEMA",
@@ -35,6 +43,9 @@ __all__ = [
     "CurrentPrefixListing",
     "IndexFile",
     "IndexManifest",
+    "IndexedBucketQuery",
+    "IndexedSearchCriteria",
+    "IndexedSearchResult",
     "ManifestStore",
     "ObjectMetadata",
     "ParquetIndexStore",
@@ -43,4 +54,5 @@ __all__ = [
     "RecursiveIndexCheckpoint",
     "RecursiveIndexResult",
     "default_cache_root",
+    "parse_indexed_search_query",
 ]
