@@ -32,6 +32,9 @@ class S3Client(Protocol):
     async def delete_objects(self, **kwargs: object) -> Mapping[str, object]:
         """Delete a batch of objects."""
 
+    async def copy_object(self, **kwargs: object) -> Mapping[str, object]:
+        """Copy one object on the provider side."""
+
     async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
         """Upload one file-like object."""
 

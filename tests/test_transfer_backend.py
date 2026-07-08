@@ -49,6 +49,14 @@ class FakeTransferS3Client:
             self.objects.pop(f"{bucket}/{item['Key']}", None)
         return {}
 
+    async def copy_object(self, **kwargs: object) -> Mapping[str, object]:
+        source = kwargs["CopySource"]
+        assert isinstance(source, dict)
+        source_key = f"{source['Bucket']}/{source['Key']}"
+        target_key = f"{kwargs['Bucket']}/{kwargs['Key']}"
+        self.objects[target_key] = self.objects[source_key]
+        return {}
+
     async def upload_fileobj(self, handle: BinaryIO, bucket: str, key: str) -> None:
         self.objects[f"{bucket}/{key}"] = handle.read()
 
@@ -145,6 +153,38 @@ def test_router_moves_local_file_to_s3(tmp_path: Path) -> None:
 
     assert not source.exists()
     assert client.objects["bucket-commander/uploads/move-me.txt"] == b"move"
+
+
+def test_router_copies_s3_object_to_s3_prefix() -> None:
+    client = FakeTransferS3Client()
+    client.objects["bucket-commander/logs/a.txt"] = b"alpha"
+    router = _router(client)
+
+    result = run_async(
+        router.copy(
+            S3Location(bucket="bucket-commander", prefix="logs/a.txt"),
+            S3Location(bucket="archive-bucket", prefix="backup/"),
+        )
+    )
+
+    assert client.objects["archive-bucket/backup/a.txt"] == b"alpha"
+    assert result.entries_affected == 1
+
+
+def test_router_moves_s3_object_to_s3_prefix() -> None:
+    client = FakeTransferS3Client()
+    client.objects["bucket-commander/logs/a.txt"] = b"alpha"
+    router = _router(client)
+
+    run_async(
+        router.move(
+            S3Location(bucket="bucket-commander", prefix="logs/a.txt"),
+            S3Location(bucket="archive-bucket", prefix="backup/"),
+        )
+    )
+
+    assert "bucket-commander/logs/a.txt" not in client.objects
+    assert client.objects["archive-bucket/backup/a.txt"] == b"alpha"
 
 
 def _router(client: FakeTransferS3Client) -> BackendRouter:

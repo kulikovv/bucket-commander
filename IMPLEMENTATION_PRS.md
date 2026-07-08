@@ -268,7 +268,7 @@ Purpose:
 Changes:
 
 - Add `src/bc/jobs/worker.py`.
-- Implement local-to-local, local-to-bucket, bucket-to-local transfers.
+- Implement local-to-local, local-to-bucket, bucket-to-local, bucket-to-bucket transfers.
 - Add move phases: plan, copy, verify, delete source, complete.
 - Add retry policy and failure reporting.
 - Add conflict behavior options.

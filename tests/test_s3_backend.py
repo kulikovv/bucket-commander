@@ -46,6 +46,10 @@ class FakeS3Client:
         self.delete_requests.append(dict(kwargs))
         return {}
 
+    async def copy_object(self, **kwargs: object) -> Mapping[str, object]:
+        _ = kwargs
+        return {}
+
     async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
         _ = fileobj, bucket, key
 

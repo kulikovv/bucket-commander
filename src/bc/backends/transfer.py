@@ -54,6 +54,8 @@ class TransferBackend(Backend):
             return await self._copy_local_to_s3(source, destination, progress)
         if isinstance(source, S3Location) and isinstance(destination, LocalLocation):
             return await self._copy_s3_to_local(source, destination, progress)
+        if isinstance(source, S3Location) and isinstance(destination, S3Location):
+            return await self._copy_s3_to_s3(source, destination, progress)
         raise _unsupported("Transfer backend only supports local/S3 transfers", source, destination)
 
     async def move(self, source: Location, destination: Location) -> OperationResult:
@@ -167,6 +169,59 @@ class TransferBackend(Backend):
             bytes_affected=bytes_total,
         )
 
+    async def _copy_s3_to_s3(
+        self,
+        source: S3Location,
+        destination: S3Location,
+        progress: ProgressSink | None,
+    ) -> OperationResult:
+        if not source.prefix:
+            raise _unsupported(
+                "S3 bucket root copy requires a selected prefix or object",
+                source,
+                destination,
+            )
+        objects = await self._s3_objects(source)
+        if not objects:
+            raise BackendError(
+                BackendErrorKind.NOT_FOUND,
+                f"No objects found at {source.uri}",
+                location=source,
+                destination=destination,
+            )
+        bytes_total = sum(size for _, size in objects)
+        _progress_update(
+            progress,
+            items_total=len(objects),
+            bytes_total=bytes_total,
+            current_item=source.uri,
+            message=f"Copying {source.name}",
+        )
+        async with self._s3._client(destination) as client:
+            for key, size in objects:
+                _progress_raise_if_cancelled(progress)
+                target_key = _join_s3_key(
+                    destination.prefix,
+                    _relative_s3_copy_key(source, key),
+                )
+                _progress_update(
+                    progress,
+                    current_item=f"s3://{source.bucket}/{key} -> s3://{destination.bucket}/{target_key}",
+                )
+                await client.copy_object(
+                    CopySource={"Bucket": source.bucket, "Key": key},
+                    Bucket=destination.bucket,
+                    Key=target_key,
+                )
+                _progress_advance(progress, items=1, bytes_count=size)
+        return OperationResult.success(
+            f"Copied {source.uri} to {destination.uri}",
+            source=source,
+            destination=_s3_copy_destination(source, destination),
+            entries_affected=len(objects),
+            bytes_affected=bytes_total,
+        )
+
     async def _s3_objects(self, source: S3Location) -> tuple[tuple[str, int], ...]:
         prefix = source.prefix
         objects: list[tuple[str, int]] = []
@@ -235,6 +290,24 @@ def _relative_s3_download_path(source: S3Location, key: str) -> Path:
         relative = key.removeprefix(source.prefix).lstrip("/")
         return Path(relative) if relative else Path(key.rsplit("/", maxsplit=1)[-1])
     return Path(key.rsplit("/", maxsplit=1)[-1])
+
+
+def _relative_s3_copy_key(source: S3Location, key: str) -> str:
+    if key == source.prefix.rstrip("/"):
+        return key.rsplit("/", maxsplit=1)[-1]
+    if source.prefix.endswith("/"):
+        return key.removeprefix(source.prefix).lstrip("/")
+    return key.rsplit("/", maxsplit=1)[-1]
+
+
+def _s3_copy_destination(source: S3Location, destination: S3Location) -> S3Location:
+    return S3Location(
+        bucket=destination.bucket,
+        prefix=_join_s3_key(destination.prefix, source.name),
+        profile=destination.profile,
+        region=destination.region,
+        endpoint_url=destination.endpoint_url,
+    )
 
 
 def _join_s3_key(prefix: str, relative_key: str) -> str:
