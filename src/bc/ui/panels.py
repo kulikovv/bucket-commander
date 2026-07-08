@@ -12,6 +12,7 @@ import urwid
 from bc.config import KnownSource
 from bc.core import Entry, EntryType, PanelState
 from bc.core.task_manager import TaskRecord, TaskState
+from bc.jobs import OperationPlan
 from bc.ui.commands import PanelId, TwoPanelState
 
 SIZE_STEP = 1024.0
@@ -23,16 +24,18 @@ SECONDARY_MOUSE_BUTTON = 3
 COMMAND_BUTTONS = (
     ("Help", "help"),
     ("View", "view"),
-    ("Search", "search"),
     ("Sort", "sort"),
     ("New File", "new_file"),
     ("Copy", "copy"),
     ("Move", "move"),
     ("New Folder", "new_folder"),
     ("Delete", "delete"),
+    ("Quit", "quit"),
+)
+BUCKET_COMMANDS = (
+    ("Search", "search"),
     ("Index", "index"),
     ("Cancel", "cancel"),
-    ("Quit", "quit"),
 )
 HELP_COMMANDS = (
     ("F1 or ?", "Show this help"),
@@ -95,6 +98,7 @@ def render_app(
     on_help: Callable[[urwid.Button], object] | None = None,
     on_command: Callable[[UiCommand], object] | None = None,
     on_location_picker: Callable[[PanelId], object] | None = None,
+    on_bucket_menu: Callable[[urwid.Button], object] | None = None,
     on_panel_mouse: PanelMouseHandler | None = None,
     panel_focus_rows: dict[PanelId, int | None] | None = None,
 ) -> urwid.Widget:
@@ -132,7 +136,7 @@ def render_app(
     )
     return urwid.Frame(
         body=body,
-        header=_location_header(sources, on_location_picker),
+        header=_location_header(sources, on_location_picker, on_bucket_menu),
         footer=footer,
     )
 
@@ -248,6 +252,100 @@ def render_search_overlay(
     )
 
 
+def render_bucket_menu_overlay(
+    base: urwid.Widget,
+    *,
+    on_command: Callable[[UiCommand], object] | None = None,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place bucket-related commands over the current application."""
+
+    rows = [
+        urwid.Button(label, on_press=_emit_bucket_menu_command, user_data=(command, on_command))
+        for label, command in BUCKET_COMMANDS
+    ]
+    close_button = urwid.Button("Close", on_press=on_close)
+    content = urwid.Pile(
+        [
+            *rows,
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Padding(close_button, align="center", width=14)),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content, title=" Bucket "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 36),
+        valign="top",
+        top=2,
+        height="pack",
+    )
+
+
+def render_operation_plan_overlay(
+    base: urwid.Widget,
+    plan: OperationPlan,
+    *,
+    on_confirm: Callable[[urwid.Button], object] | None = None,
+    on_cancel: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place an operation planning confirmation over the current application."""
+
+    destination = plan.destination.label if plan.destination is not None else "n/a"
+    expanded = "unknown" if plan.expanded_count is None else str(plan.expanded_count)
+    bytes_text = "unknown" if plan.estimated_bytes is None else _format_bytes(plan.estimated_bytes)
+    entry_rows = [
+        urwid.Text(f" - {entry.name} ({entry.entry_type.value})", wrap="clip")
+        for entry in plan.entries[:8]
+    ]
+    remaining = plan.direct_count - len(entry_rows)
+    if remaining > 0:
+        entry_rows.append(urwid.Text(f" - ... {remaining} more", wrap="clip"))
+    phase_rows = [urwid.Text(f" - {phase}", wrap="clip") for phase in plan.destructive_phases]
+    content = urwid.Pile(
+        [
+            ("pack", urwid.Text(f" Operation: {plan.kind.value}", wrap="clip")),
+            ("pack", urwid.Text(f" Source panel: {plan.source_panel}", wrap="clip")),
+            ("pack", urwid.Text(f" Destination: {destination}", wrap="clip")),
+            ("pack", urwid.Text(f" Direct entries: {plan.direct_count}", wrap="clip")),
+            ("pack", urwid.Text(f" Expanded entries: {expanded}", wrap="clip")),
+            ("pack", urwid.Text(f" Estimated bytes: {bytes_text}", wrap="clip")),
+            ("pack", urwid.Text(f" Expansion: {plan.expansion_state.value}", wrap="clip")),
+            ("pack", urwid.Text(f" Conflicts: {plan.conflict_policy.value}", wrap="clip")),
+            ("pack", urwid.Text(f" Resumability: {plan.resumability}", wrap="clip")),
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Text(" Selected entries:", wrap="clip")),
+            *[("pack", row) for row in entry_rows],
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Text(" Destructive phases:", wrap="clip")),
+            *[("pack", row) for row in phase_rows],
+            ("pack", urwid.Divider()),
+            (
+                "pack",
+                urwid.Columns(
+                    [
+                        ("given", 14, urwid.Button("Confirm", on_press=on_confirm)),
+                        ("given", 14, urwid.Button("Cancel", on_press=on_cancel)),
+                    ],
+                    dividechars=2,
+                ),
+            ),
+        ]
+    )
+    title = f" Confirm {plan.kind.value.title()} "
+    dialog = urwid.AttrMap(urwid.LineBox(content, title=title), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 72),
+        valign="middle",
+        height="pack",
+    )
+
+
 def render_location_picker_overlay(
     base: urwid.Widget,
     sources: tuple[KnownSource, ...],
@@ -291,6 +389,7 @@ def render_location_picker_overlay(
 def _location_header(
     sources: tuple[KnownSource, ...],
     on_location_picker: Callable[[PanelId], object] | None,
+    on_bucket_menu: Callable[[urwid.Button], object] | None,
 ) -> urwid.Widget:
     left_button = urwid.Button(
         "Left",
@@ -302,12 +401,14 @@ def _location_header(
         on_press=_emit_location_picker,
         user_data=(PanelId.RIGHT, on_location_picker),
     )
+    bucket_button = urwid.Button("Bucket", on_press=on_bucket_menu)
     return urwid.AttrMap(
         urwid.Columns(
             [
                 ("pack", urwid.Text(" Locations ")),
                 ("given", 12, left_button),
                 ("given", 12, right_button),
+                ("given", 14, bucket_button),
                 ("weight", 1, urwid.Text(f" {len(sources)} known location(s)", wrap="clip")),
             ],
             dividechars=1,
@@ -373,6 +474,15 @@ def _emit_command(
     command, on_command = user_data
     if on_command is not None:
         on_command(command)
+
+
+def _emit_bucket_menu_command(
+    _button: urwid.Button,
+    user_data: tuple[str, Callable[[UiCommand], object] | None],
+) -> None:
+    command, on_command = user_data
+    if on_command is not None:
+        on_command(UiCommand(command))
 
 
 def _task_footer(tasks: tuple[TaskRecord, ...]) -> urwid.Widget:

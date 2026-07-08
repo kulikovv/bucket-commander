@@ -2,6 +2,21 @@
 
 This plan splits Bucket Commander into logical, reviewable pull requests. The order is intentionally foundation-first: each PR should leave the app in a runnable or testable state and avoid mixing UI, storage, bucket APIs, and batch-job machinery in one large change.
 
+## Cross-Cutting UX Direction
+
+Bucket Commander should feel familiar to Midnight Commander users while making cloud-specific state obvious and trustworthy. The primary UX promise is: users can keep browsing while the app clearly explains how fresh, complete, and safe each bucket view or operation is.
+
+Apply these principles throughout the PRs:
+
+- Keep the two-panel interface dense, keyboard-first, and predictable.
+- Put critical state in panel headers or inline rows, not only in transient footer messages.
+- Make cache and index states visible with compact labels such as `live`, `cached`, `fresh`, `stale`, and `partial`.
+- Treat destructive or expensive actions as planned operations: preview scope, destination, item count, bytes, conflict behavior, and risk before execution.
+- Distinguish visible-panel filtering from indexed bucket search.
+- Keep long-running work observable and controllable without blocking navigation.
+- Prefer contextual command labels over a static footer when the active panel, selected entries, or active task changes.
+- Remove or quarantine prototype UI code once replacement flows are in place.
+
 ## PR 1: Project Packaging And Test Harness
 
 Purpose:
@@ -77,6 +92,8 @@ Changes:
 - Add `src/bc/ui/commands.py`.
 - Keep Urwid or switch to Textual, but make the choice explicit in this PR.
 - Support panel focus, directory navigation, parent navigation, refresh, and footer status.
+- Add contextual panel headers that show location, backend type, sort mode, selection count, loading state, and active filter/search state.
+- Keep command labels compact and commander-style, with keyboard shortcuts visible in help.
 - Remove or quarantine prototype code that conflicts with the new structure.
 
 Acceptance:
@@ -84,6 +101,7 @@ Acceptance:
 - App opens with two local panels.
 - User can switch panels and navigate local directories.
 - UI reads through `LocalBackend`, not `os.listdir` directly.
+- Users can tell which panel is focused, what backend each panel is showing, and how many entries are selected.
 
 ## PR 5: Task Manager And Real Progress Plumbing
 
@@ -98,12 +116,15 @@ Changes:
 - Add progress model with item count, byte count, current item, and message.
 - Wire local copy/delete operations through tasks.
 - Replace simulated progress with task-driven progress UI.
+- Replace prototype progress dialogs with the task-driven footer or task summary.
+- Show current task phase, item progress, byte progress, current file, and failure summary in a compact footer.
 
 Acceptance:
 
 - Long local operations can report progress.
 - Operations can be cancelled where supported.
 - UI remains responsive during task execution.
+- The footer never reports fake progress; all visible progress comes from task records.
 
 ## PR 6: Parquet Index Foundation
 
@@ -157,7 +178,9 @@ Changes:
 - On bucket open, load cached prefix entries first.
 - Start live listing in the background.
 - Append live listing results to Parquet.
-- Show cache state: cached, live, stale, partial, fresh.
+- Show cache state in the panel header and footer: cached, live, stale, partial, fresh.
+- Show when the panel is rendering cached data while a live refresh is still running.
+- Add compact row or metadata indicators for object-specific cache state where useful.
 - Add refresh current prefix.
 
 Acceptance:
@@ -165,6 +188,7 @@ Acceptance:
 - Reopening a visited prefix displays cached results quickly.
 - Live listing updates the panel incrementally.
 - New listing batches are written as new Parquet files and tracked in the manifest.
+- Users can distinguish cached, live, stale, partial, and fresh views without opening help.
 
 ## PR 9: Recursive Indexer With Checkpoints
 
@@ -179,12 +203,14 @@ Changes:
 - Add checkpoint files.
 - Add resume after interruption.
 - Update prefix summary metadata.
+- Surface recursive indexing as an explicit background task with pause, cancel, resume, current prefix, objects indexed, bytes indexed, and checkpoint status.
 
 Acceptance:
 
 - User can start recursive indexing for a bucket/prefix.
 - Indexing can be cancelled and resumed.
 - Prefix summaries distinguish partial and fully indexed prefixes.
+- Users can continue browsing while indexing runs and can see whether the current prefix is partially or fully indexed.
 
 ## PR 10: Indexed Search And Sort For Buckets
 
@@ -199,12 +225,16 @@ Changes:
 - Support search by name/key, prefix, size, and modified time.
 - Support large result pagination or virtualization.
 - Show partial/stale coverage warnings.
+- Make search mode visually distinct from normal browsing.
+- Show result coverage inline: total matches, displayed limit, partial index, stale index, and sorted field.
+- Offer an action from stale or partial results to refresh or recursively index the relevant prefix.
 
 Acceptance:
 
 - Search over indexed bucket metadata works without remote listing.
 - Results indicate whether the index is partial or stale.
 - Large result sets do not freeze the UI.
+- Users can tell whether they are filtering visible entries or searching the persisted bucket index.
 
 ## PR 11: Durable Batch Job Architecture
 
@@ -220,12 +250,14 @@ Changes:
 - Add `src/bc/jobs/queue.py`.
 - Add SQLite job store.
 - Add job item model and status transitions.
+- Add job planning records that capture source, destination, selected entries, expanded item count, estimated bytes, conflict policy, and destructive phases.
 
 Acceptance:
 
 - A copy/move/delete request can be converted into a durable job plan.
 - Job state survives app restart.
 - Job planning uses indexed bucket metadata when available.
+- Job plans can be displayed for confirmation before execution.
 
 ## PR 12: Batch Workers And Transfers
 
@@ -240,12 +272,14 @@ Changes:
 - Add move phases: plan, copy, verify, delete source, complete.
 - Add retry policy and failure reporting.
 - Add conflict behavior options.
+- Add preflight checks for destination conflicts, unknown prefix expansion, stale indexes, and destructive follow-up phases.
 
 Acceptance:
 
 - Batch copy jobs execute outside direct UI ownership.
 - Failed items are recorded and retryable.
 - Move deletes source only after successful verification.
+- Copy, move, and delete operations expose enough planned scope for safe confirmation.
 
 ## PR 13: Job Monitor UI
 
@@ -259,12 +293,15 @@ Changes:
 - Show queued, active, paused, failed, and completed jobs.
 - Add pause, resume, cancel, retry failed, and view errors.
 - Link file panels to active job status.
+- Show job details: phase, throughput, ETA when knowable, current item, failed item count, retry count, source, destination, and created time.
+- Add a compact active-job indicator in the footer that opens the full job monitor.
 
 Acceptance:
 
 - User can continue browsing while jobs run.
 - User can inspect job progress and failures.
 - Cancel/pause/resume actions update durable state.
+- Users can recover from partial failures without leaving the TUI.
 
 ## PR 14: Configuration And Profiles
 
@@ -279,12 +316,14 @@ Changes:
 - Read `~/.config/bucket-commander/config.toml`.
 - Support environment overrides.
 - Add cache directory selection and provider settings.
+- Add UI configuration for theme, keymap, hidden files, confirmation behavior, default conflict behavior, and whether advanced metadata columns are shown.
 
 Acceptance:
 
 - Configuration loads with documented defaults.
 - Environment variables override config.
 - S3 profile/region/endpoint can be configured.
+- UI behavior can be configured without editing code.
 
 ## PR 15: Hardening, Compaction, And Release Readiness
 
@@ -301,6 +340,9 @@ Changes:
 - Add destructive-operation confirmations.
 - Add documentation for cache sensitivity and credentials.
 - Add performance tests for large indexes.
+- Add recovery prompts for damaged indexes: ignore cache, rebuild prefix, or rebuild bucket.
+- Add final UX pass for empty states, permission errors, expired credentials, narrow terminals, and very large directories.
+- Remove or quarantine obsolete prototype UI modules that are no longer part of the runnable app.
 
 Acceptance:
 
@@ -308,4 +350,5 @@ Acceptance:
 - Damaged indexes do not block live bucket access.
 - Credentials are not written to logs or cache.
 - Release documentation explains known limitations.
-
+- Destructive actions require confirmation unless explicitly disabled.
+- Error states explain the problem and the next useful action.

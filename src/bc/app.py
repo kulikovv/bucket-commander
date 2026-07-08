@@ -36,6 +36,7 @@ from bc.index import (
     RecursiveBucketIndexer,
     parse_indexed_search_query,
 )
+from bc.jobs import OperationPlan, plan_delete, plan_move
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -52,8 +53,10 @@ from bc.ui.commands import (
 from bc.ui.panels import (
     UiCommand,
     render_app,
+    render_bucket_menu_overlay,
     render_help_overlay,
     render_location_picker_overlay,
+    render_operation_plan_overlay,
     render_search_overlay,
     render_view_overlay,
 )
@@ -100,7 +103,10 @@ class BucketCommanderApp:
         self._loop: urwid.MainLoop | None = None
         self._is_help_open = False
         self._view_dialog: tuple[str, str] | None = None
+        self._pending_operation_plan: OperationPlan | None = None
+        self._pending_operation_executor: Callable[[], None] | None = None
         self._location_picker_panel: PanelId | None = None
+        self._is_bucket_menu_open = False
         self._search_panel: PanelId | None = None
         self._search_text = ""
         self._sources = _with_builtin_sources(config.sources.sources)
@@ -158,6 +164,8 @@ class BucketCommanderApp:
         return (
             self._handle_help_key(key)
             or self._handle_view_key(key)
+            or self._handle_operation_plan_key(key)
+            or self._handle_bucket_menu_key(key)
             or self._handle_search_key(key)
             or self._handle_location_picker_key(key)
         )
@@ -199,6 +207,22 @@ class BucketCommanderApp:
             return False
         if key in {"q", "Q", "esc", "enter", "f3"}:
             self._close_view_dialog()
+        return True
+
+    def _handle_operation_plan_key(self, key: str) -> bool:
+        if self._pending_operation_plan is None:
+            return False
+        if key in {"enter"}:
+            self._confirm_operation_plan()
+        elif key in {"q", "Q", "esc"}:
+            self._cancel_operation_plan()
+        return True
+
+    def _handle_bucket_menu_key(self, key: str) -> bool:
+        if not self._is_bucket_menu_open:
+            return False
+        if key in {"q", "Q", "esc"}:
+            self._close_bucket_menu()
         return True
 
     def _handle_search_key(self, key: str) -> bool:
@@ -243,6 +267,7 @@ class BucketCommanderApp:
     def _handle_ui_command(self, command: UiCommand) -> None:
         if command is UiCommand.QUIT:
             raise urwid.ExitMainLoop()
+        self._is_bucket_menu_open = False
         handlers: dict[UiCommand, Callable[[], None]] = {
             UiCommand.HELP: self._show_help_dialog,
             UiCommand.VIEW: self._view_current_entry,
@@ -371,6 +396,30 @@ class BucketCommanderApp:
         self._view_dialog = None
         self._redraw()
 
+    def _confirm_operation_plan(self, _button: urwid.Button | None = None) -> None:
+        executor = self._pending_operation_executor
+        self._pending_operation_plan = None
+        self._pending_operation_executor = None
+        if executor is None:
+            self._update(self._state.with_status("No pending operation to confirm"))
+            return
+        executor()
+
+    def _cancel_operation_plan(self, _button: urwid.Button | None = None) -> None:
+        plan = self._pending_operation_plan
+        self._pending_operation_plan = None
+        self._pending_operation_executor = None
+        action = "operation" if plan is None else plan.kind.value
+        self._update(self._state.with_status(f"Cancelled {action}"))
+
+    def _show_bucket_menu(self, _button: urwid.Button | None = None) -> None:
+        self._is_bucket_menu_open = True
+        self._redraw()
+
+    def _close_bucket_menu(self, _button: urwid.Button | None = None) -> None:
+        self._is_bucket_menu_open = False
+        self._redraw()
+
     def _show_search_dialog(self, _button: urwid.Button | None = None) -> None:
         self._search_panel = self._state.focused
         self._search_text = self._state.active.filter_text
@@ -471,6 +520,16 @@ class BucketCommanderApp:
         if not entries:
             self._update(self._state.with_status("No entry selected"))
             return
+        plan = plan_move(entries, source_panel=source_panel.value, destination=destination)
+        if not plan.entries:
+            self._update(self._state.with_status("No entries to move"))
+            return
+        def executor() -> None:
+            self._execute_move_tasks(entries, destination)
+
+        self._show_operation_plan(plan, executor)
+
+    def _execute_move_tasks(self, entries: tuple[Entry, ...], destination: Location) -> None:
         started = 0
         for entry in entries:
             if entry.name == "..":
@@ -498,6 +557,16 @@ class BucketCommanderApp:
         if not entries:
             self._update(self._state.with_status("No entry selected"))
             return
+        plan = plan_delete(entries, source_panel=source_panel.value)
+        if not plan.entries:
+            self._update(self._state.with_status("No entries to delete"))
+            return
+        def executor() -> None:
+            self._execute_delete_tasks(entries)
+
+        self._show_operation_plan(plan, executor)
+
+    def _execute_delete_tasks(self, entries: tuple[Entry, ...]) -> None:
         started = 0
         for entry in entries:
             if entry.name == "..":
@@ -517,6 +586,20 @@ class BucketCommanderApp:
             self._tasks.start_task(TaskType.DELETE, delete_task, source=entry.location)
             started += 1
         self._after_task_start(started, "delete")
+
+    def _show_operation_plan(
+        self,
+        plan: OperationPlan,
+        executor: Callable[[], None],
+    ) -> None:
+        self._pending_operation_plan = plan
+        self._pending_operation_executor = executor
+        self._update(
+            self._state.with_status(
+                f"Confirm {plan.kind.value}: {plan.direct_count} selected entry"
+                f"{'' if plan.direct_count == 1 else 's'}"
+            )
+        )
 
     def _start_index_task(self) -> None:
         target = self._index_target()
@@ -678,35 +761,50 @@ class BucketCommanderApp:
             on_help=self._show_help_dialog,
             on_command=self._handle_ui_command,
             on_location_picker=self._show_location_picker,
+            on_bucket_menu=self._show_bucket_menu,
             on_panel_mouse=self._handle_panel_mouse,
             panel_focus_rows=self._panel_focus_rows,
         )
+        widget = app
         if self._is_help_open:
-            return render_help_overlay(app, on_close=self._close_help_dialog)
-        if self._view_dialog is not None:
+            widget = render_help_overlay(app, on_close=self._close_help_dialog)
+        elif self._view_dialog is not None:
             title, content = self._view_dialog
-            return render_view_overlay(
+            widget = render_view_overlay(
                 app,
                 title=title,
                 content=content,
                 on_close=self._close_view_dialog,
             )
-        if self._search_panel is not None:
-            return render_search_overlay(
+        elif self._pending_operation_plan is not None:
+            widget = render_operation_plan_overlay(
+                app,
+                self._pending_operation_plan,
+                on_confirm=self._confirm_operation_plan,
+                on_cancel=self._cancel_operation_plan,
+            )
+        elif self._is_bucket_menu_open:
+            widget = render_bucket_menu_overlay(
+                app,
+                on_command=self._handle_ui_command,
+                on_close=self._close_bucket_menu,
+            )
+        elif self._search_panel is not None:
+            widget = render_search_overlay(
                 app,
                 query=self._search_text,
                 on_apply=self._apply_search_dialog,
                 on_close=self._close_search_dialog,
             )
-        if self._location_picker_panel is not None:
-            return render_location_picker_overlay(
+        elif self._location_picker_panel is not None:
+            widget = render_location_picker_overlay(
                 app,
                 self._sources,
                 self._location_picker_panel,
                 on_select=self._select_location_source,
                 on_close=self._close_location_picker,
             )
-        return app
+        return widget
 
     def _schedule_task_poll(self) -> None:
         if self._loop is None or self._task_poll_scheduled:

@@ -22,6 +22,7 @@ Bucket exploration must be asynchronous and incremental. Bucket metadata must be
 - Support resumable indexing and refresh of changed bucket prefixes.
 - Keep provider-specific bucket APIs behind a small abstraction layer.
 - Make common commander operations ergonomic: open, copy, move, delete, rename, mkdir, refresh, search, select, compare, and view metadata.
+- Make cloud-specific state understandable at a glance: cache freshness, partial indexes, live refreshes, background jobs, and destructive-operation scope.
 
 ## 3. Non-Goals For Initial Version
 
@@ -61,6 +62,8 @@ A panel is one side of the two-panel interface. Each panel has:
 - filter/search state
 - background task status
 - index freshness indicator when viewing a bucket
+- visible cache/index state when viewing a bucket
+- active operation or job indicator when relevant
 
 ### 5.2 Location
 
@@ -117,6 +120,20 @@ The user must be able to:
 - create local directory or bucket prefix marker where supported
 - view metadata/details for the selected entry
 - cancel long-running operations
+
+The interface must make important state visible without requiring the help screen:
+
+- focused panel
+- backend type for each panel
+- current location
+- sort field and order
+- selection count
+- visible filter or indexed search query
+- loading or live-refresh state
+- cache/index state for bucket panels
+- current task or job status
+
+Footer commands should be contextual where possible. The footer may remain compact, but it should avoid advertising actions that are unavailable for the current panel, selection, or task without a clear disabled/explanatory state.
 
 ### 6.2 Local Filesystem Backend
 
@@ -185,6 +202,47 @@ The UI must communicate cache state:
 - partial: index does not cover all descendants
 - stale: cache is older than configured TTL or provider marker
 - fresh: current prefix has been recently listed
+
+### 6.6 Operation Safety And Planning
+
+Potentially destructive, expensive, or large operations must be planned before execution. This includes:
+
+- delete
+- move
+- recursive copy
+- bucket prefix operations
+- bucket-to-bucket transfers
+- recursive indexing of large prefixes
+
+Before execution, the UI must show a confirmation or planning view with:
+
+- source and destination where applicable
+- selected direct entries
+- expanded object/file count when known
+- estimated total bytes when known
+- whether expansion is complete, partial, stale, or still live
+- conflict behavior
+- destructive phases such as "delete source after verify"
+- expected resumability and retry behavior for durable jobs
+
+Delete and move confirmations must be required by default. Configuration may allow advanced users to reduce confirmation prompts, but destructive scope must still be recoverable or explicit.
+
+### 6.7 Search And Discovery UX
+
+The application must distinguish between:
+
+- visible-panel filtering, which narrows entries already loaded in the panel
+- indexed bucket search, which queries persisted Parquet metadata
+- live refresh or live recursive indexing, which contacts the provider
+
+Indexed search results must show:
+
+- query text
+- total result count when known
+- displayed result limit or page
+- sort field and order
+- coverage state: full, partial, stale, or unknown
+- next useful action when coverage is partial or stale, such as refresh current prefix or index recursively
 
 ## 7. Parquet Index Design
 
@@ -382,6 +440,21 @@ Task records must include:
 
 The UI subscribes to task updates rather than polling backend internals.
 
+### 8.4 Job And Task Observability
+
+Short-lived tasks and durable jobs must be visible without blocking panel navigation. The UI must provide:
+
+- a compact active-task or active-job indicator
+- a detailed task/job view
+- status: queued, running, paused, cancelling, cancelled, failed, completed
+- phase for multi-step work, such as planning, copying, verifying, deleting, retrying, or compacting
+- item progress, byte progress, current item, and recent error
+- throughput and ETA when enough data is available
+- failure counts and retry controls where durable jobs support retry
+- pause, resume, cancel, and retry failed actions where supported
+
+If multiple tasks or jobs are active, the UI must make it clear which one is currently summarized in the footer and provide a way to inspect the rest.
+
 ## 9. User Workflows
 
 ### 9.1 Open Bucket
@@ -392,7 +465,8 @@ The UI subscribes to task updates rather than polling backend internals.
 4. Application starts async listing for the current prefix.
 5. Panel updates as live entries arrive.
 6. New metadata is written to Parquet in batches.
-7. Footer shows cache and listing status.
+7. Panel header and footer show cache and listing status.
+8. User can keep navigating while the live refresh continues.
 
 ### 9.2 Recursive Bucket Index
 
@@ -403,6 +477,7 @@ The UI subscribes to task updates rather than polling backend internals.
 5. Checkpoints are saved regularly.
 6. User can cancel and resume later.
 7. On completion, prefix summaries are updated.
+8. The job/task view shows current prefix, checkpoint status, indexed object count, bytes indexed, and whether the viewed prefix is partially or fully indexed.
 
 ### 9.3 Search Bucket
 
@@ -410,15 +485,17 @@ The UI subscribes to task updates rather than polling backend internals.
 2. Application queries Parquet first.
 3. If the index is partial or stale, UI shows that result coverage is partial.
 4. User can optionally start live recursive search/indexing from the query view.
+5. Search mode remains visually distinct from normal browsing until the user exits it.
 
 ### 9.4 Copy From Bucket To Local
 
 1. User selects objects or prefixes in the bucket panel.
 2. User invokes copy to the local panel.
-3. Application expands selected prefixes using the index plus live listing where needed.
-4. Downloads run with bounded concurrency.
-5. Progress shows object count, byte count, throughput, current file, failures.
-6. Failed files can be retried.
+3. Application shows an operation plan with destination, selected entries, known expansion coverage, conflict behavior, estimated count, and estimated bytes.
+4. Application expands selected prefixes using the index plus live listing where needed.
+5. Downloads run with bounded concurrency.
+6. Progress shows object count, byte count, throughput, current file, failures.
+7. Failed files can be retried.
 
 ## 10. Performance Requirements
 
@@ -428,6 +505,7 @@ The UI subscribes to task updates rather than polling backend internals.
 - Batch writes should avoid writing Parquet files smaller than necessary during steady indexing.
 - Large result sets should be virtualized or paginated in the UI.
 - Search over indexed metadata should complete within seconds for millions of objects when using DuckDB or Polars over Parquet.
+- Task and cache state updates should be lightweight enough that they do not cause visible panel flicker during large listings or transfers.
 
 ## 11. Error Handling
 
@@ -443,7 +521,9 @@ The application must handle:
 - insufficient disk space for cache or downloads
 - corrupted index files
 
-Index corruption should not prevent live bucket access. The application should offer to rebuild or ignore the damaged cache.
+Index corruption should not prevent live bucket access. The application should offer clear recovery choices such as ignore cache, rebuild current prefix, or rebuild bucket index.
+
+Errors shown in the UI must explain the problem and the next useful action when one exists. Examples include retry, refresh credentials, refresh prefix, rebuild cache, free disk space, or open job details.
 
 ## 12. Configuration
 
@@ -459,8 +539,10 @@ Configuration should include:
 - max transfer concurrency
 - multipart upload/download thresholds
 - default conflict behavior
+- destructive confirmation behavior
 - hidden file visibility
 - theme/keymap
+- optional advanced metadata columns
 
 Configuration file location:
 
@@ -510,6 +592,10 @@ UI tests:
 - command handling
 - progress display
 - cancellation flow
+- destructive-operation confirmation
+- cache/index state indicators
+- indexed-search coverage warnings
+- job monitor and retry controls
 
 Performance tests:
 
@@ -540,12 +626,14 @@ Performance tests:
 - Cache current-prefix listings.
 - Load cached prefix before live listing.
 - Add cache state indicators.
+- Show cache/index state in panel headers and relevant rows.
 
 ### Phase 4: Recursive Indexing And Search
 
 - Add recursive background indexer.
 - Add checkpoints and resume.
 - Add indexed search with partial/stale coverage indicators.
+- Make indexed search visually distinct from visible-panel filtering.
 - Add compaction.
 
 ### Phase 5: Robust Operations
@@ -554,6 +642,8 @@ Performance tests:
 - Add transfer conflict handling.
 - Add server-side bucket copy where supported.
 - Add batch failure report and retry.
+- Add operation planning and confirmation views.
+- Add job monitor UI for durable operations.
 - Add configuration and profile management.
 
 ## 16. Acceptance Criteria
@@ -570,5 +660,7 @@ The application is acceptable when:
 - Interrupted recursive indexing can resume from a checkpoint.
 - Search can query indexed bucket metadata from Parquet.
 - Local-to-bucket and bucket-to-local transfers show progress and can be cancelled.
+- Users can see whether bucket panels and search results are live, cached, fresh, stale, partial, or fully indexed.
+- Destructive operations show a plan and require confirmation by default.
+- Durable jobs can be inspected, paused, resumed, cancelled, and retried where supported.
 - Credentials are not written to cache or logs.
-

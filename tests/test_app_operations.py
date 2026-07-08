@@ -291,6 +291,11 @@ def test_move_task_ignores_marked_entries_when_other_panel_is_focused(
 
         app._start_move_tasks()
 
+        assert app._pending_operation_plan is not None
+        assert app._pending_operation_plan.direct_count == 1
+        assert app._tasks.records() == ()
+        app._confirm_operation_plan()
+
         records = app._tasks.records()
         assert len(records) == 1
         assert records[0].task_type is TaskType.MOVE
@@ -337,6 +342,11 @@ def test_delete_task_ignores_marked_entries_when_other_panel_is_focused(
 
         app._start_delete_tasks()
 
+        assert app._pending_operation_plan is not None
+        assert app._pending_operation_plan.direct_count == 1
+        assert app._tasks.records() == ()
+        app._confirm_operation_plan()
+
         records = app._tasks.records()
         assert len(records) == 1
         assert records[0].task_type is TaskType.DELETE
@@ -368,12 +378,41 @@ def test_delete_task_starts_for_s3_entries(tmp_path: Path) -> None:
 
         app._start_delete_tasks()
 
+        assert app._pending_operation_plan is not None
+        app._confirm_operation_plan()
+
         records = app._tasks.records()
         assert len(records) == 1
         assert records[0].task_type is TaskType.DELETE
         assert records[0].source == entry.location
         wait_for_task(app._tasks, records[0].task_id)
         assert backend.delete_calls == [(entry.location, False)]
+    finally:
+        app._tasks.close()
+
+
+def test_cancel_delete_plan_does_not_start_task(tmp_path: Path) -> None:
+    file_path = tmp_path / "current.txt"
+    file_path.write_text("current", encoding="utf-8")
+    entry = Entry(
+        location=parse_location(file_path),
+        name="current.txt",
+        entry_type=EntryType.FILE,
+    )
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path), entries=(entry,)),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._start_delete_tasks()
+        app._cancel_operation_plan()
+
+        assert app._pending_operation_plan is None
+        assert app._tasks.records() == ()
+        assert file_path.exists()
+        assert app._state.status_message == "Cancelled delete"
     finally:
         app._tasks.close()
 

@@ -5,12 +5,16 @@ import urwid
 from bc.app import AppConfig, BucketCommanderApp
 from bc.config import KnownSource, SourcesConfig
 from bc.core import Entry, EntryType, PanelState, S3Location, parse_location
+from bc.jobs import plan_move
 from bc.ui.commands import PanelId, TwoPanelState
 from bc.ui.panels import (
     PanelListBox,
+    UiCommand,
     render_app,
+    render_bucket_menu_overlay,
     render_help_overlay,
     render_location_picker_overlay,
+    render_operation_plan_overlay,
     render_search_overlay,
     render_view_overlay,
 )
@@ -26,11 +30,13 @@ def test_render_app_includes_help_button(tmp_path: Path) -> None:
 
     assert "< Help" in rendered
     assert "< View" in rendered
-    assert "< Search" in rendered
     assert "< Sort" in rendered
     assert "< Copy" in rendered
     assert "< Move" in rendered
     assert "< Delete" in rendered
+    assert "< Search" not in rendered
+    assert "< Index" not in rendered
+    assert "< Cancel" not in rendered
 
 
 def test_render_app_includes_location_panel(tmp_path: Path) -> None:
@@ -48,6 +54,7 @@ def test_render_app_includes_location_panel(tmp_path: Path) -> None:
     assert "Locations" in rendered
     assert "< Left" in rendered
     assert "< Right" in rendered
+    assert "< Bucket" in rendered
     assert "1 known location" in rendered
 
 
@@ -242,6 +249,45 @@ def test_render_search_overlay_shows_query(tmp_path: Path) -> None:
     assert "< Close" in rendered
 
 
+def test_render_bucket_menu_overlay_lists_bucket_commands(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(render_bucket_menu_overlay(render_app(state)))
+
+    assert "Bucket" in rendered
+    assert "< Search" in rendered
+    assert "< Index" in rendered
+    assert "< Cancel" in rendered
+    assert "< Close" in rendered
+
+
+def test_render_operation_plan_overlay_shows_move_scope(tmp_path: Path) -> None:
+    entry = Entry(
+        location=parse_location(tmp_path / "document.txt"),
+        name="document.txt",
+        entry_type=EntryType.FILE,
+        size=42,
+    )
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path), entries=(entry,)),
+        right=PanelState(location=parse_location(tmp_path / "target")),
+    )
+    plan = plan_move((entry,), source_panel="left", destination=state.right.location)
+
+    rendered = render_text(render_operation_plan_overlay(render_app(state), plan))
+
+    assert "Confirm Move" in rendered
+    assert "document.txt" in rendered
+    assert "Expanded entries: 1" in rendered
+    assert "Estimated bytes: 42B" in rendered
+    assert "delete source after verify" in rendered
+    assert "< Confirm" in rendered
+    assert "< Cancel" in rendered
+
+
 def test_render_view_overlay_shows_content(tmp_path: Path) -> None:
     state = TwoPanelState(
         left=PanelState(location=parse_location(tmp_path)),
@@ -266,6 +312,20 @@ def test_help_keys_toggle_modal_without_running_loop(tmp_path: Path) -> None:
 
     app._handle_key("esc")
     assert not app._is_help_open
+
+
+def test_bucket_menu_command_opens_search_dialog(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._show_bucket_menu()
+        assert app._is_bucket_menu_open
+
+        app._handle_ui_command(UiCommand.SEARCH)
+
+        assert not app._is_bucket_menu_open
+        assert app._search_panel is PanelId.LEFT
+    finally:
+        app._tasks.close()
 
 
 def test_view_key_closes_modal_without_running_loop(tmp_path: Path) -> None:
