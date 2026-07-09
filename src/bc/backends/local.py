@@ -43,6 +43,10 @@ class LocalBackend(Backend):
         local = self._require_local(location)
         return await self._run(lambda: self._mkdir_sync(local, parents=parents))
 
+    async def create_file(self, location: Location) -> OperationResult:
+        local = self._require_local(location)
+        return await self._run(lambda: self._create_file_sync(local))
+
     async def copy(
         self,
         source: Location,
@@ -119,6 +123,16 @@ class LocalBackend(Backend):
 
     def _mkdir_sync(self, location: LocalLocation, *, parents: bool) -> OperationResult:
         location.path.mkdir(parents=parents, exist_ok=False)
+        return OperationResult.success(
+            f"Created {location.path}",
+            destination=location,
+            entries_affected=1,
+        )
+
+    def _create_file_sync(self, location: LocalLocation) -> OperationResult:
+        location.path.parent.mkdir(parents=True, exist_ok=True)
+        with location.path.open("xb"):
+            pass
         return OperationResult.success(
             f"Created {location.path}",
             destination=location,

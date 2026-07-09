@@ -12,6 +12,8 @@ from bc.backends.s3 import S3Backend, S3Client, S3ClientFactory
 from bc.core import Entry, LocalLocation, Location, OperationResult, S3Location
 from bc.core.task_manager import ProgressSink
 
+KEEP_MARKER_NAME = ".keep"
+
 
 class TransferBackend(Backend):
     """Copy and move entries between the local filesystem and S3."""
@@ -42,6 +44,9 @@ class TransferBackend(Backend):
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         _ = parents
         raise _unsupported("Transfer backend does not create locations", location)
+
+    async def create_file(self, location: Location) -> OperationResult:
+        raise _unsupported("Transfer backend does not create files", location)
 
     async def copy(
         self,
@@ -116,6 +121,7 @@ class TransferBackend(Backend):
                 key = _join_s3_key(destination.prefix, relative_key)
                 _progress_update(progress, current_item=f"{path} -> s3://{destination.bucket}/{key}")
                 await _upload_file(client, path, destination.bucket, key)
+                await _delete_parent_keep_marker(client, destination.bucket, key)
                 _progress_advance(progress, items=1, bytes_count=size)
         return OperationResult.success(
             f"Copied {source.uri} to {destination.uri}",
@@ -213,6 +219,7 @@ class TransferBackend(Backend):
                     Bucket=destination.bucket,
                     Key=target_key,
                 )
+                await _delete_parent_keep_marker(client, destination.bucket, target_key)
                 _progress_advance(progress, items=1, bytes_count=size)
         return OperationResult.success(
             f"Copied {source.uri} to {destination.uri}",
@@ -312,6 +319,17 @@ def _s3_copy_destination(source: S3Location, destination: S3Location) -> S3Locat
 
 def _join_s3_key(prefix: str, relative_key: str) -> str:
     return f"{prefix.rstrip('/')}/{relative_key}".lstrip("/")
+
+
+def _keep_marker_key(prefix: str) -> str:
+    return f"{prefix.rstrip('/')}/{KEEP_MARKER_NAME}".lstrip("/")
+
+
+async def _delete_parent_keep_marker(client: S3Client, bucket: str, key: str) -> None:
+    parent = key.rsplit("/", maxsplit=1)[0] if "/" in key else ""
+    marker_key = _keep_marker_key(f"{parent}/" if parent else "")
+    if marker_key != key:
+        await client.delete_object(Bucket=bucket, Key=marker_key)
 
 
 def _sequence_of_mappings(value: object) -> tuple[dict[str, object], ...]:

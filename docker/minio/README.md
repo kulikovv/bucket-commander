@@ -30,3 +30,6 @@ Stop the stack:
 ```bash
 docker compose -f docker-compose.minio.yml down
 ```
+
+
+AWS_ACCESS_KEY_ID=bucketcommander AWS_SECRET_ACCESS_KEY=bucketcommander123 uv run bucket-commander --left . --right .

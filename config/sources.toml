@@ -7,5 +7,5 @@
 name = "Local MinIO"
 uri = "s3://bucket-commander/"
 region = "us-east-1"
-endpoint_url = "http://127.0.0.1:9000"
+endpoint_url = "q"
 credential_source = "environment"

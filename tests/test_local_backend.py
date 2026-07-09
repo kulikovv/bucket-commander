@@ -69,6 +69,17 @@ def test_mkdir_creates_directory(tmp_path: Path) -> None:
     assert target.path.is_dir()
 
 
+def test_create_file_creates_empty_file(tmp_path: Path) -> None:
+    target = local(tmp_path / "one" / "document.txt")
+
+    result = run(LocalBackend().create_file(target))
+
+    assert result.ok
+    assert result.entries_affected == 1
+    assert target.path.is_file()
+    assert target.path.read_bytes() == b""
+
+
 def test_copy_file_to_existing_directory(tmp_path: Path) -> None:
     source = tmp_path / "source.txt"
     destination = tmp_path / "destination"

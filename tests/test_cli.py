@@ -77,6 +77,32 @@ endpoint_url = "http://127.0.0.1:9000"
     assert main(["--sources-config", str(config_path)], app_runner=runner) == 0
 
 
+def test_cli_loads_app_settings_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    cache_root = tmp_path / "cache"
+    config_path.write_text(
+        f"""
+[cache]
+root = "{cache_root}"
+
+[s3]
+profile = "dev"
+region = "us-east-1"
+endpoint_url = "http://127.0.0.1:9000/"
+""",
+        encoding="utf-8",
+    )
+
+    def runner(config: AppConfig) -> int:
+        assert config.settings.cache_root == cache_root
+        assert config.settings.profiles.default_s3.profile_name == "dev"
+        assert config.settings.profiles.default_s3.region_name == "us-east-1"
+        assert config.settings.profiles.default_s3.endpoint_url == "http://127.0.0.1:9000/"
+        return 0
+
+    assert main(["--config", str(config_path)], app_runner=runner) == 0
+
+
 def test_cli_loads_project_sources_config_by_default(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.chdir(tmp_path)
     config_dir = tmp_path / "config"

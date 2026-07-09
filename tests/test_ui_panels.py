@@ -3,9 +3,19 @@ from pathlib import Path
 import urwid
 
 from bc.app import AppConfig, BucketCommanderApp
-from bc.config import KnownSource, SourcesConfig
+from bc.config import (
+    AppSettings,
+    IndexSettings,
+    KnownSource,
+    OperationSettings,
+    ProviderProfiles,
+    ProviderSettings,
+    S3ProviderProfile,
+    SourcesConfig,
+    UISettings,
+)
 from bc.core import Entry, EntryType, PanelState, S3Location, parse_location
-from bc.jobs import plan_move
+from bc.jobs import JobItemStatus, SQLiteJobStore, plan_delete, plan_move
 from bc.ui.commands import PanelId, TwoPanelState
 from bc.ui.panels import (
     PanelListBox,
@@ -13,9 +23,12 @@ from bc.ui.panels import (
     render_app,
     render_bucket_menu_overlay,
     render_help_overlay,
+    render_jobs_overlay,
     render_location_picker_overlay,
+    render_name_prompt_overlay,
     render_operation_plan_overlay,
     render_search_overlay,
+    render_settings_overlay,
     render_view_overlay,
 )
 
@@ -249,6 +262,22 @@ def test_render_search_overlay_shows_query(tmp_path: Path) -> None:
     assert "< Close" in rendered
 
 
+def test_render_name_prompt_overlay_shows_name(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(
+        render_name_prompt_overlay(render_app(state), title="New File", name="notes.txt")
+    )
+
+    assert "New File" in rendered
+    assert "Name: notes.txt" in rendered
+    assert "< Create" in rendered
+    assert "< Close" in rendered
+
+
 def test_render_bucket_menu_overlay_lists_bucket_commands(tmp_path: Path) -> None:
     state = TwoPanelState(
         left=PanelState(location=parse_location(tmp_path)),
@@ -261,6 +290,55 @@ def test_render_bucket_menu_overlay_lists_bucket_commands(tmp_path: Path) -> Non
     assert "< Search" in rendered
     assert "< Index" in rendered
     assert "< Cancel" in rendered
+    assert "< Close" in rendered
+
+
+def test_render_settings_overlay_shows_resolved_settings(tmp_path: Path) -> None:
+    cache_root = Path("/tmp/bc-cache")
+    settings = AppSettings(
+        cache_root=cache_root,
+        profiles=ProviderProfiles(
+            default_s3=S3ProviderProfile(
+                profile_name="dev",
+                region_name="us-east-1",
+                endpoint_url="http://127.0.0.1:9000/",
+            ),
+            s3_profiles=(S3ProviderProfile(name="archive", profile_name="archive-profile"),),
+        ),
+        provider=ProviderSettings(default_provider="s3"),
+        index=IndexSettings(ttl_seconds=600),
+        operations=OperationSettings(
+            max_listing_concurrency=2,
+            max_transfer_concurrency=3,
+            multipart_upload_threshold=16 * 1024 * 1024,
+            multipart_download_threshold=32 * 1024 * 1024,
+            default_conflict_behavior="fail if exists",
+            confirm_destructive=False,
+        ),
+        ui=UISettings(
+            theme="high-contrast",
+            keymap="commander",
+            show_hidden_files=True,
+            show_advanced_metadata=True,
+        ),
+    )
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(render_settings_overlay(render_app(state), settings), size=(120, 60))
+
+    assert "Settings" in rendered
+    assert f"Cache root: {cache_root}" in rendered
+    assert "Default provider: s3" in rendered
+    assert "Index TTL: 600s" in rendered
+    assert "profile: dev" in rendered
+    assert "endpoint: http://127.0.0.1:9000/" in rendered
+    assert "Named S3 profiles: archive" in rendered
+    assert "multipart upload threshold: 16.0M" in rendered
+    assert "confirm destructive: no" in rendered
+    assert "show hidden files: yes" in rendered
     assert "< Close" in rendered
 
 
@@ -286,6 +364,66 @@ def test_render_operation_plan_overlay_shows_move_scope(tmp_path: Path) -> None:
     assert "delete source after verify" in rendered
     assert "< Confirm" in rendered
     assert "< Cancel" in rendered
+
+
+def test_render_app_shows_durable_job_footer(tmp_path: Path) -> None:
+    entry = Entry(
+        location=parse_location(tmp_path / "document.txt"),
+        name="document.txt",
+        entry_type=EntryType.FILE,
+    )
+    store = SQLiteJobStore(tmp_path / "jobs.sqlite3")
+    record = store.add_plan(plan_delete((entry,), source_panel="left"))
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(render_app(state, jobs=(record,)))
+
+    assert "Jobs:" in rendered
+    assert "delete queued" in rendered
+
+
+def test_render_jobs_overlay_shows_details_and_controls(tmp_path: Path) -> None:
+    source = tmp_path / "document.txt"
+    source.write_text("content", encoding="utf-8")
+    entry = Entry(
+        location=parse_location(source),
+        name="document.txt",
+        entry_type=EntryType.FILE,
+        size=source.stat().st_size,
+    )
+    store = SQLiteJobStore(tmp_path / "jobs.sqlite3")
+    record = store.add_plan(plan_delete((entry,), source_panel="left"))
+    item = store.list_items(record.job_id)[0]
+    failed_item = item.__class__(
+        item_id=item.item_id,
+        job_id=item.job_id,
+        item_index=item.item_index,
+        name=item.name,
+        location=item.location,
+        entry_type=item.entry_type,
+        size=item.size,
+        status=JobItemStatus.FAILED,
+        attempts=2,
+        latest_error="permission denied",
+    )
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(render_jobs_overlay(render_app(state), (record,), (failed_item,)))
+
+    assert "Jobs" in rendered
+    assert record.job_id in rendered
+    assert "document.txt" in rendered
+    assert "permission denied" in rendered
+    assert "< Pause" in rendered
+    assert "< Resume" in rendered
+    assert "< Cancel" in rendered
+    assert "< Retry" in rendered
 
 
 def test_render_view_overlay_shows_content(tmp_path: Path) -> None:
@@ -328,6 +466,28 @@ def test_bucket_menu_command_opens_search_dialog(tmp_path: Path) -> None:
         app._tasks.close()
 
 
+def test_jobs_command_opens_monitor(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._handle_ui_command(UiCommand.JOBS)
+
+        assert app._is_jobs_open
+    finally:
+        app._tasks.close()
+
+
+def test_settings_key_toggles_modal_without_running_loop(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._handle_key("g")
+        assert app._is_settings_open
+
+        app._handle_key("esc")
+        assert not app._is_settings_open
+    finally:
+        app._tasks.close()
+
+
 def test_view_key_closes_modal_without_running_loop(tmp_path: Path) -> None:
     app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
     app._view_dialog = ("document.txt", "content")
@@ -358,6 +518,6 @@ def test_select_location_source_updates_target_panel(tmp_path: Path) -> None:
         app._tasks.close()
 
 
-def render_text(widget: urwid.Widget) -> str:
-    canvas = widget.render((100, 30), focus=True)
+def render_text(widget: urwid.Widget, *, size: tuple[int, int] = (100, 30)) -> str:
+    canvas = widget.render(size, focus=True)
     return "\n".join(line.decode("utf-8", errors="replace") for line in canvas.text)

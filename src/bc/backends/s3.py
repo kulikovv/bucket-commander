@@ -7,11 +7,14 @@ import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import BinaryIO, Protocol, SupportsInt, cast
 
 from bc.backends.base import Backend, BackendError, BackendErrorKind, PreviewResult
 from bc.core import Entry, EntryType, Location, OperationResult, S3Location
 from bc.core.task_manager import ProgressSink
+
+KEEP_MARKER_NAME = ".keep"
 
 
 class S3Client(Protocol):
@@ -152,7 +155,41 @@ class S3Backend(Backend):
 
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         _ = parents
-        raise _unsupported("S3 prefix creation is not implemented yet", location)
+        s3_location = self._require_s3(location)
+        if not s3_location.prefix:
+            raise _unsupported("S3 bucket creation is not supported", location)
+        key = _keep_marker_key(s3_location.prefix)
+        try:
+            async with self._client(s3_location) as client:
+                await client.upload_fileobj(BytesIO(b""), s3_location.bucket, key)
+        except BackendError:
+            raise
+        except Exception as error:
+            raise _backend_error(error, location=s3_location) from error
+        return OperationResult.success(
+            f"Created {s3_location.uri}",
+            destination=s3_location,
+            entries_affected=1,
+        )
+
+    async def create_file(self, location: Location) -> OperationResult:
+        s3_location = self._require_s3(location)
+        if not s3_location.prefix:
+            raise _unsupported("S3 file creation requires an object key", location)
+        key = s3_location.prefix.rstrip("/")
+        try:
+            async with self._client(s3_location) as client:
+                await client.upload_fileobj(BytesIO(b""), s3_location.bucket, key)
+                await _delete_parent_keep_marker(client, s3_location.bucket, key)
+        except BackendError:
+            raise
+        except Exception as error:
+            raise _backend_error(error, location=s3_location) from error
+        return OperationResult.success(
+            f"Created {s3_location.uri}",
+            destination=s3_location,
+            entries_affected=1,
+        )
 
     async def copy(
         self,
@@ -337,7 +374,7 @@ def _object_entries(location: S3Location, page: Mapping[str, object]) -> tuple[E
     entries: list[Entry] = []
     for item in contents:
         key = _optional_str(item.get("Key"))
-        if key is None or key == location.prefix:
+        if key is None or key == location.prefix or _is_keep_marker_key(key):
             continue
         name = _object_name(key, location.prefix)
         if "/" in name.rstrip("/"):
@@ -431,6 +468,21 @@ def _prefix_name(prefix: str, parent_prefix: str) -> str:
 
 def _object_name(key: str, parent_prefix: str) -> str:
     return key.removeprefix(parent_prefix)
+
+
+def _keep_marker_key(prefix: str) -> str:
+    return f"{prefix.rstrip('/')}/{KEEP_MARKER_NAME}".lstrip("/")
+
+
+def _is_keep_marker_key(key: str) -> bool:
+    return key.rsplit("/", maxsplit=1)[-1] == KEEP_MARKER_NAME
+
+
+async def _delete_parent_keep_marker(client: S3Client, bucket: str, key: str) -> None:
+    parent = key.rsplit("/", maxsplit=1)[0] if "/" in key else ""
+    marker_key = _keep_marker_key(f"{parent}/" if parent else "")
+    if marker_key != key:
+        await client.delete_object(Bucket=bucket, Key=marker_key)
 
 
 def _optional_str(value: object) -> str | None:

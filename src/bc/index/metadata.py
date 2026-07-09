@@ -8,6 +8,8 @@ from bc.core import Entry, EntryType, S3Location
 from bc.index.cache_paths import account_id
 from bc.index.parquet_store import ObjectMetadata, PrefixMetadata
 
+KEEP_MARKER_NAME = ".keep"
+
 
 def metadata_rows(
     location: S3Location,
@@ -23,6 +25,8 @@ def metadata_rows(
         if not isinstance(entry.location, S3Location):
             continue
         if entry.name == "..":
+            continue
+        if entry.name == KEEP_MARKER_NAME:
             continue
         if entry.entry_type is EntryType.OBJECT:
             objects.append(

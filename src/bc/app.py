@@ -13,8 +13,15 @@ from typing import Any
 
 import urwid
 
-from bc.backends import BackendError, BackendRouter, LocalBackend, S3Backend, TransferBackend
-from bc.config import KnownSource, SourcesConfig
+from bc.backends import (
+    BackendError,
+    BackendRouter,
+    LocalBackend,
+    S3Backend,
+    S3BackendConfig,
+    TransferBackend,
+)
+from bc.config import AppSettings, KnownSource, SourcesConfig
 from bc.core import (
     Entry,
     EntryType,
@@ -36,7 +43,16 @@ from bc.index import (
     RecursiveBucketIndexer,
     parse_indexed_search_query,
 )
-from bc.jobs import OperationPlan, plan_delete, plan_move
+from bc.jobs import (
+    DurableJobQueue,
+    JobItem,
+    JobRecord,
+    JobStatus,
+    OperationPlan,
+    SQLiteJobStore,
+    plan_delete,
+    plan_move,
+)
 from bc.ui.commands import (
     PanelId,
     TwoPanelState,
@@ -55,16 +71,15 @@ from bc.ui.panels import (
     render_app,
     render_bucket_menu_overlay,
     render_help_overlay,
+    render_jobs_overlay,
     render_location_picker_overlay,
+    render_name_prompt_overlay,
     render_operation_plan_overlay,
     render_search_overlay,
+    render_settings_overlay,
     render_view_overlay,
 )
 
-PENDING_COMMAND_KEYS = {
-    "f4": "New file",
-    "f7": "New folder",
-}
 TASK_POLL_SECONDS = 0.1
 VIEW_MAX_BYTES = 64 * 1024
 DOUBLE_CLICK_SECONDS = 0.5
@@ -77,7 +92,9 @@ class AppConfig:
     left: Location
     right: Location
     sources: SourcesConfig = field(default_factory=SourcesConfig)
+    settings: AppSettings = field(default_factory=AppSettings.defaults)
     cache_root: Path | None = None
+    job_store_path: Path | None = None
 
     @classmethod
     def from_paths(cls, *, left: Path, right: Path) -> AppConfig:
@@ -88,7 +105,7 @@ class BucketCommanderApp:
     """Minimal two-panel local file manager."""
 
     def __init__(self, config: AppConfig) -> None:
-        self._s3_backend = S3Backend()
+        self._s3_backend = S3Backend(_s3_backend_config(config.settings))
         self._backend = BackendRouter(
             (
                 LocalBackend(),
@@ -101,8 +118,12 @@ class BucketCommanderApp:
             right=PanelState(location=config.right),
         )
         self._loop: urwid.MainLoop | None = None
+        self._settings = config.settings
         self._is_help_open = False
         self._view_dialog: tuple[str, str] | None = None
+        self._is_jobs_open = False
+        self._is_settings_open = False
+        self._create_prompt: tuple[str, str] | None = None
         self._pending_operation_plan: OperationPlan | None = None
         self._pending_operation_executor: Callable[[], None] | None = None
         self._location_picker_panel: PanelId | None = None
@@ -110,16 +131,18 @@ class BucketCommanderApp:
         self._search_panel: PanelId | None = None
         self._search_text = ""
         self._sources = _with_builtin_sources(config.sources.sources)
-        self._bucket_cache = (
-            CacheBackedBucketPanel(config.cache_root)
-            if config.cache_root is not None
-            else CacheBackedBucketPanel.default()
-        )
+        cache_root = config.cache_root or config.settings.cache_root
+        self._bucket_cache = CacheBackedBucketPanel(cache_root)
         self._indexer = RecursiveBucketIndexer(
             backend=self._s3_backend,
             cache_root=self._bucket_cache.cache_root,
         )
         self._bucket_query = IndexedBucketQuery(self._bucket_cache.cache_root)
+        self._job_store_path = config.job_store_path or (
+            self._bucket_cache.cache_root / "jobs" / "jobs.sqlite3"
+        )
+        self._job_store: SQLiteJobStore | None = None
+        self._job_queue: DurableJobQueue | None = None
         self._panel_focus_rows: dict[PanelId, int | None] = {
             PanelId.LEFT: None,
             PanelId.RIGHT: None,
@@ -157,13 +180,14 @@ class BucketCommanderApp:
             return
         if self._handle_task_key(key):
             return
-        if key in PENDING_COMMAND_KEYS:
-            self._show_pending_command(PENDING_COMMAND_KEYS[key])
 
     def _handle_modal_key(self, key: str) -> bool:
         return (
             self._handle_help_key(key)
             or self._handle_view_key(key)
+            or self._handle_jobs_key(key)
+            or self._handle_settings_key(key)
+            or self._handle_create_prompt_key(key)
             or self._handle_operation_plan_key(key)
             or self._handle_bucket_menu_key(key)
             or self._handle_search_key(key)
@@ -185,14 +209,22 @@ class BucketCommanderApp:
             if self._leave_search_mode(self._state.focused):
                 return True
             self._run_command(lambda: go_parent(self._state, self._backend))
-        elif key in {"r", "R", "ctrl r"}:
-            self._refresh_panel(self._state.focused)
-        elif key == "/":
-            self._show_search_dialog()
-        elif key in {"o", "O"}:
-            self._cycle_sort()
         else:
-            return False
+            handler = {
+                "r": lambda: self._refresh_panel(self._state.focused),
+                "R": lambda: self._refresh_panel(self._state.focused),
+                "ctrl r": lambda: self._refresh_panel(self._state.focused),
+                "/": self._show_search_dialog,
+                "o": self._cycle_sort,
+                "O": self._cycle_sort,
+                "j": self._show_jobs_dialog,
+                "J": self._show_jobs_dialog,
+                "g": self._show_settings_dialog,
+                "G": self._show_settings_dialog,
+            }.get(key)
+            if handler is None:
+                return False
+            handler()
         return True
 
     def _handle_help_key(self, key: str) -> bool:
@@ -207,6 +239,36 @@ class BucketCommanderApp:
             return False
         if key in {"q", "Q", "esc", "enter", "f3"}:
             self._close_view_dialog()
+        return True
+
+    def _handle_jobs_key(self, key: str) -> bool:
+        if not self._is_jobs_open:
+            return False
+        if key in {"q", "Q", "esc", "j", "J"}:
+            self._close_jobs_dialog()
+        return True
+
+    def _handle_settings_key(self, key: str) -> bool:
+        if not self._is_settings_open:
+            return False
+        if key in {"q", "Q", "esc", "enter", "g", "G"}:
+            self._close_settings_dialog()
+        return True
+
+    def _handle_create_prompt_key(self, key: str) -> bool:
+        if self._create_prompt is None:
+            return False
+        kind, name = self._create_prompt
+        if key in {"esc", "q"}:
+            self._close_create_prompt()
+        elif key == "enter":
+            self._apply_create_prompt()
+        elif key == "backspace":
+            self._create_prompt = (kind, name[:-1])
+            self._redraw()
+        elif len(key) == 1 and key.isprintable():
+            self._create_prompt = (kind, f"{name}{key}")
+            self._redraw()
         return True
 
     def _handle_operation_plan_key(self, key: str) -> bool:
@@ -254,6 +316,10 @@ class BucketCommanderApp:
             self._start_copy_tasks()
         elif key == "f6":
             self._start_move_tasks()
+        elif key == "f4":
+            self._show_create_prompt("file")
+        elif key == "f7":
+            self._show_create_prompt("folder")
         elif key in {"f8", "delete"}:
             self._start_delete_tasks()
         elif key in {"i", "I"}:
@@ -273,12 +339,13 @@ class BucketCommanderApp:
             UiCommand.VIEW: self._view_current_entry,
             UiCommand.SEARCH: self._show_search_dialog,
             UiCommand.SORT: self._cycle_sort,
-            UiCommand.NEW_FILE: lambda: self._show_pending_command("New file"),
+            UiCommand.JOBS: self._show_jobs_dialog,
+            UiCommand.NEW_FILE: lambda: self._show_create_prompt("file"),
             UiCommand.SELECT: lambda: self._update(toggle_selection(self._state)),
             UiCommand.REFRESH: lambda: self._refresh_panel(self._state.focused),
             UiCommand.COPY: self._start_copy_tasks,
             UiCommand.MOVE: self._start_move_tasks,
-            UiCommand.NEW_FOLDER: lambda: self._show_pending_command("New folder"),
+            UiCommand.NEW_FOLDER: lambda: self._show_create_prompt("folder"),
             UiCommand.DELETE: self._start_delete_tasks,
             UiCommand.INDEX: self._start_index_task,
             UiCommand.CANCEL: self._cancel_latest_task,
@@ -381,9 +448,6 @@ class BucketCommanderApp:
             f"{location.label}: {len(entries)} live entries ({cache_status})"
         )
 
-    def _show_pending_command(self, command_name: str) -> None:
-        self._update(self._state.with_status(f"{command_name} is not implemented yet"))
-
     def _show_help_dialog(self, _button: urwid.Button | None = None) -> None:
         self._is_help_open = True
         self._redraw()
@@ -395,6 +459,96 @@ class BucketCommanderApp:
     def _close_view_dialog(self, _button: urwid.Button | None = None) -> None:
         self._view_dialog = None
         self._redraw()
+
+    def _show_jobs_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._is_jobs_open = True
+        self._redraw()
+
+    def _close_jobs_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._is_jobs_open = False
+        self._redraw()
+
+    def _show_settings_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._is_settings_open = True
+        self._redraw()
+
+    def _close_settings_dialog(self, _button: urwid.Button | None = None) -> None:
+        self._is_settings_open = False
+        self._redraw()
+
+    def _show_create_prompt(self, kind: str) -> None:
+        self._create_prompt = (kind, "")
+        self._redraw()
+
+    def _close_create_prompt(self, _button: urwid.Button | None = None) -> None:
+        self._create_prompt = None
+        self._redraw()
+
+    def _apply_create_prompt(self, _button: urwid.Button | None = None) -> None:
+        prompt = self._create_prompt
+        if prompt is None:
+            return
+        kind, name = prompt
+        self._create_prompt = None
+        self._create_entry(kind, name.strip())
+
+    def _create_entry(self, kind: str, name: str) -> None:
+        if not name:
+            self._update(self._state.with_status("Name must not be empty"))
+            return
+        panel_id = self._state.focused
+        panel = self._state.panel(panel_id)
+        try:
+            target = panel.location.child(name)
+            if kind == "file" and isinstance(panel.location, S3Location):
+                target = S3Location(
+                    bucket=panel.location.bucket,
+                    prefix=f"{panel.location.prefix}{name}".lstrip("/"),
+                    profile=panel.location.profile,
+                    region=panel.location.region,
+                    endpoint_url=panel.location.endpoint_url,
+                )
+        except ValueError as error:
+            self._update(self._state.with_status(str(error)))
+            return
+        try:
+            if kind == "file":
+                asyncio.run(self._backend.create_file(target))
+            else:
+                asyncio.run(self._backend.mkdir(target))
+        except BackendError as error:
+            self._update(self._state.with_status(str(error)))
+            return
+        self._refresh_panel(panel_id)
+        self._update(self._state.with_status(f"Created {target.label}"))
+
+    def _pause_latest_job(self, _button: urwid.Button | None = None) -> None:
+        self._update_latest_job("pause", lambda queue, job_id: queue.pause(job_id))
+
+    def _resume_latest_job(self, _button: urwid.Button | None = None) -> None:
+        self._update_latest_job("resume", lambda queue, job_id: queue.resume(job_id))
+
+    def _cancel_latest_job(self, _button: urwid.Button | None = None) -> None:
+        self._update_latest_job("cancel", lambda queue, job_id: queue.request_cancel(job_id))
+
+    def _retry_latest_job(self, _button: urwid.Button | None = None) -> None:
+        self._update_latest_job("retry", lambda queue, job_id: queue.resume(job_id))
+
+    def _update_latest_job(
+        self,
+        action: str,
+        update: Callable[[DurableJobQueue, str], JobRecord],
+    ) -> None:
+        job = self._latest_visible_job()
+        if job is None:
+            self._update(self._state.with_status(f"No durable job to {action}"))
+            return
+        try:
+            updated = update(self._ensure_job_queue(), job.job_id)
+        except (KeyError, ValueError) as error:
+            self._update(self._state.with_status(f"Cannot {action} job: {error}"))
+            return
+        self._update(self._state.with_status(f"{updated.job_id}: {updated.status.value}"))
 
     def _confirm_operation_plan(self, _button: urwid.Button | None = None) -> None:
         executor = self._pending_operation_executor
@@ -758,10 +912,13 @@ class BucketCommanderApp:
             self._state,
             sources=self._sources,
             tasks=self._tasks.records(),
+            jobs=self._durable_jobs(),
             on_help=self._show_help_dialog,
             on_command=self._handle_ui_command,
+            on_jobs=self._show_jobs_dialog,
             on_location_picker=self._show_location_picker,
             on_bucket_menu=self._show_bucket_menu,
+            on_settings=self._show_settings_dialog,
             on_panel_mouse=self._handle_panel_mouse,
             panel_focus_rows=self._panel_focus_rows,
         )
@@ -775,6 +932,32 @@ class BucketCommanderApp:
                 title=title,
                 content=content,
                 on_close=self._close_view_dialog,
+            )
+        elif self._create_prompt is not None:
+            kind, name = self._create_prompt
+            widget = render_name_prompt_overlay(
+                app,
+                title="New File" if kind == "file" else "New Folder",
+                name=name,
+                on_apply=self._apply_create_prompt,
+                on_close=self._close_create_prompt,
+            )
+        elif self._is_jobs_open:
+            widget = render_jobs_overlay(
+                app,
+                self._durable_jobs(),
+                self._durable_job_items(),
+                on_pause=self._pause_latest_job,
+                on_resume=self._resume_latest_job,
+                on_cancel=self._cancel_latest_job,
+                on_retry=self._retry_latest_job,
+                on_close=self._close_jobs_dialog,
+            )
+        elif self._is_settings_open:
+            widget = render_settings_overlay(
+                app,
+                self._settings,
+                on_close=self._close_settings_dialog,
             )
         elif self._pending_operation_plan is not None:
             widget = render_operation_plan_overlay(
@@ -805,6 +988,44 @@ class BucketCommanderApp:
                 on_close=self._close_location_picker,
             )
         return widget
+
+    def _ensure_job_queue(self) -> DurableJobQueue:
+        if self._job_queue is None:
+            self._job_store = SQLiteJobStore(self._job_store_path)
+            self._job_queue = DurableJobQueue(self._job_store)
+        return self._job_queue
+
+    def _ensure_job_store(self) -> SQLiteJobStore:
+        self._ensure_job_queue()
+        if self._job_store is None:
+            msg = "Job store was not initialized"
+            raise RuntimeError(msg)
+        return self._job_store
+
+    def _durable_jobs(self) -> tuple[JobRecord, ...]:
+        try:
+            return self._ensure_job_queue().list_jobs()
+        except OSError:
+            return ()
+
+    def _durable_job_items(self) -> tuple[JobItem, ...]:
+        job = self._latest_visible_job()
+        if job is None:
+            return ()
+        try:
+            return self._ensure_job_store().list_items(job.job_id)
+        except OSError:
+            return ()
+
+    def _latest_visible_job(self) -> JobRecord | None:
+        jobs = self._durable_jobs()
+        for job in reversed(jobs):
+            if not job.status.is_terminal:
+                return job
+        for job in reversed(jobs):
+            if job.status is JobStatus.FAILED:
+                return job
+        return jobs[-1] if jobs else None
 
     def _schedule_task_poll(self) -> None:
         if self._loop is None or self._task_poll_scheduled:
@@ -848,6 +1069,15 @@ def _with_builtin_sources(sources: tuple[KnownSource, ...]) -> tuple[KnownSource
         credential_source="local",
     )
     return (local_source, *sources)
+
+
+def _s3_backend_config(settings: AppSettings) -> S3BackendConfig:
+    profile = settings.profiles.default_s3
+    return S3BackendConfig(
+        profile_name=profile.profile_name,
+        region_name=profile.region_name,
+        endpoint_url=profile.endpoint_url,
+    )
 
 
 def _next_sort(current: SortField, order: SortOrder) -> tuple[SortField, SortOrder]:

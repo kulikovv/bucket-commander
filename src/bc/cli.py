@@ -8,7 +8,12 @@ from pathlib import Path
 
 from bc import __version__
 from bc.app import AppConfig, run_app
-from bc.config import SourcesConfigError, load_sources_config
+from bc.config import (
+    SettingsConfigError,
+    SourcesConfigError,
+    load_app_settings,
+    load_sources_config,
+)
 from bc.core import parse_location
 
 
@@ -33,6 +38,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Initial location for the right panel, such as a path or s3://bucket/prefix/.",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Application settings TOML file. Defaults to "
+            "~/.config/bucket-commander/config.toml or BUCKET_COMMANDER_CONFIG."
+        ),
+    )
+    parser.add_argument(
         "--sources-config",
         type=Path,
         default=None,
@@ -53,13 +67,15 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        settings = load_app_settings(args.config)
         sources = load_sources_config(args.sources_config)
-    except SourcesConfigError as error:
+    except (SettingsConfigError, SourcesConfigError) as error:
         parser.error(str(error))
     return app_runner(
         AppConfig(
             left=parse_location(args.left),
             right=parse_location(args.right),
             sources=sources,
+            settings=settings,
         )
     )

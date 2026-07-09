@@ -19,6 +19,7 @@ class FakeS3Client:
         self._pages = pages
         self.list_requests: list[dict[str, object]] = []
         self.delete_requests: list[dict[str, object]] = []
+        self.upload_requests: list[tuple[str, str, bytes]] = []
 
     async def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
         self.list_requests.append(dict(kwargs))
@@ -51,7 +52,7 @@ class FakeS3Client:
         return {}
 
     async def upload_fileobj(self, fileobj: BinaryIO, bucket: str, key: str) -> None:
-        _ = fileobj, bucket, key
+        self.upload_requests.append((bucket, key, fileobj.read()))
 
     async def download_fileobj(self, bucket: str, key: str, fileobj: BinaryIO) -> None:
         _ = bucket, key, fileobj
@@ -225,6 +226,46 @@ def test_s3_entries_preserve_location_connection_metadata() -> None:
         for entry in entries
         if isinstance(entry.location, S3Location)
     } == {"http://127.0.0.1:9000"}
+
+
+def test_list_hides_keep_marker_objects() -> None:
+    client = FakeS3Client(
+        (
+            {
+                "Contents": [
+                    {"Key": "logs/.keep", "Size": 0},
+                    {"Key": "logs/a.txt", "Size": FIRST_OBJECT_SIZE},
+                ],
+                "IsTruncated": False,
+            },
+        )
+    )
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    entries = run_async(backend.list(parse_location("s3://example-bucket/logs/")))
+
+    assert [entry.name for entry in entries] == ["a.txt"]
+
+
+def test_mkdir_creates_keep_marker_object() -> None:
+    client = FakeS3Client(())
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    result = run_async(backend.mkdir(parse_location("s3://example-bucket/logs/new/")))
+
+    assert result.ok
+    assert client.upload_requests == [("example-bucket", "logs/new/.keep", b"")]
+
+
+def test_create_file_uploads_empty_object_and_deletes_parent_keep_marker() -> None:
+    client = FakeS3Client(())
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    result = run_async(backend.create_file(parse_location("s3://example-bucket/logs/a.txt")))
+
+    assert result.ok
+    assert client.upload_requests == [("example-bucket", "logs/a.txt", b"")]
+    assert client.delete_requests == [{"Bucket": "example-bucket", "Key": "logs/.keep"}]
 
 
 def test_stat_reads_object_head_metadata() -> None:

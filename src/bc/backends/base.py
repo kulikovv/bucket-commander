@@ -74,6 +74,10 @@ class Backend(ABC):
         """Create a directory or prefix."""
 
     @abstractmethod
+    async def create_file(self, location: Location) -> OperationResult:
+        """Create an empty file or object."""
+
+    @abstractmethod
     async def copy(
         self,
         source: Location,

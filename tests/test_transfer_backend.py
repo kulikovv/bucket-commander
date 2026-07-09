@@ -120,6 +120,23 @@ def test_router_copies_local_file_to_s3(tmp_path: Path) -> None:
     assert result.entries_affected == 1
 
 
+def test_router_copies_local_file_to_s3_removes_parent_keep_marker(tmp_path: Path) -> None:
+    source = tmp_path / "hello.txt"
+    source.write_text("hello", encoding="utf-8")
+    client = FakeTransferS3Client()
+    client.objects["bucket-commander/uploads/.keep"] = b""
+    router = _router(client)
+
+    run_async(
+        router.copy(
+            parse_location(source),
+            S3Location(bucket="bucket-commander", prefix="uploads/"),
+        )
+    )
+
+    assert "bucket-commander/uploads/.keep" not in client.objects
+
+
 def test_router_copies_s3_object_to_local_directory(tmp_path: Path) -> None:
     destination = tmp_path / "downloads"
     destination.mkdir()
@@ -169,6 +186,22 @@ def test_router_copies_s3_object_to_s3_prefix() -> None:
 
     assert client.objects["archive-bucket/backup/a.txt"] == b"alpha"
     assert result.entries_affected == 1
+
+
+def test_router_copies_s3_object_to_s3_removes_parent_keep_marker() -> None:
+    client = FakeTransferS3Client()
+    client.objects["bucket-commander/logs/a.txt"] = b"alpha"
+    client.objects["archive-bucket/backup/.keep"] = b""
+    router = _router(client)
+
+    run_async(
+        router.copy(
+            S3Location(bucket="bucket-commander", prefix="logs/a.txt"),
+            S3Location(bucket="archive-bucket", prefix="backup/"),
+        )
+    )
+
+    assert "archive-bucket/backup/.keep" not in client.objects
 
 
 def test_router_moves_s3_object_to_s3_prefix() -> None:

@@ -9,10 +9,10 @@ from typing import Protocol
 
 import urwid
 
-from bc.config import KnownSource
+from bc.config import AppSettings, KnownSource
 from bc.core import Entry, EntryType, PanelState
 from bc.core.task_manager import TaskRecord, TaskState
-from bc.jobs import OperationPlan
+from bc.jobs import JobItem, JobItemStatus, JobRecord, JobStatus, OperationPlan
 from bc.ui.commands import PanelId, TwoPanelState
 
 SIZE_STEP = 1024.0
@@ -25,6 +25,7 @@ COMMAND_BUTTONS = (
     ("Help", "help"),
     ("View", "view"),
     ("Sort", "sort"),
+    ("Jobs", "jobs"),
     ("New File", "new_file"),
     ("Copy", "copy"),
     ("Move", "move"),
@@ -49,6 +50,7 @@ HELP_COMMANDS = (
     ("/", "Search indexed bucket metadata"),
     ("\\", "Leave indexed search"),
     ("O", "Cycle sort field"),
+    ("G", "Show resolved settings"),
     ("F4", "Create a new file"),
     ("F5", "Copy selected entries"),
     ("F6", "Move selected entries"),
@@ -79,6 +81,7 @@ class UiCommand(StrEnum):
     SEARCH = "search"
     SORT = "sort"
     NEW_FILE = "new_file"
+    JOBS = "jobs"
     SELECT = "select"
     REFRESH = "refresh"
     COPY = "copy"
@@ -95,10 +98,13 @@ def render_app(
     *,
     sources: tuple[KnownSource, ...] = (),
     tasks: tuple[TaskRecord, ...] = (),
+    jobs: tuple[JobRecord, ...] = (),
     on_help: Callable[[urwid.Button], object] | None = None,
     on_command: Callable[[UiCommand], object] | None = None,
+    on_jobs: Callable[[urwid.Button], object] | None = None,
     on_location_picker: Callable[[PanelId], object] | None = None,
     on_bucket_menu: Callable[[urwid.Button], object] | None = None,
+    on_settings: Callable[[urwid.Button], object] | None = None,
     on_panel_mouse: PanelMouseHandler | None = None,
     panel_focus_rows: dict[PanelId, int | None] | None = None,
 ) -> urwid.Widget:
@@ -131,12 +137,13 @@ def render_app(
         [
             ("pack", _command_footer(on_help, on_command)),
             ("pack", _task_footer(tasks)),
+            ("pack", _job_footer(jobs, on_jobs)),
             ("pack", urwid.AttrMap(urwid.Text(state.status_message, wrap="clip"), "footer")),
         ]
     )
     return urwid.Frame(
         body=body,
-        header=_location_header(sources, on_location_picker, on_bucket_menu),
+        header=_location_header(sources, on_location_picker, on_bucket_menu, on_settings),
         footer=footer,
     )
 
@@ -252,6 +259,43 @@ def render_search_overlay(
     )
 
 
+def render_name_prompt_overlay(
+    base: urwid.Widget,
+    *,
+    title: str,
+    name: str,
+    on_apply: Callable[[urwid.Button], object] | None = None,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place a simple name prompt over the current application."""
+
+    content = urwid.Pile(
+        [
+            ("pack", urwid.Text(f" Name: {name or '<type a name>'}", wrap="clip")),
+            ("pack", urwid.Divider()),
+            (
+                "pack",
+                urwid.Columns(
+                    [
+                        ("given", 14, urwid.Button("Create", on_press=on_apply)),
+                        ("given", 14, urwid.Button("Close", on_press=on_close)),
+                    ],
+                    dividechars=2,
+                ),
+            ),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content, title=f" {title} "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 58),
+        valign="middle",
+        height="pack",
+    )
+
+
 def render_bucket_menu_overlay(
     base: urwid.Widget,
     *,
@@ -281,6 +325,37 @@ def render_bucket_menu_overlay(
         valign="top",
         top=2,
         height="pack",
+    )
+
+
+def render_settings_overlay(
+    base: urwid.Widget,
+    settings: AppSettings,
+    *,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place resolved application settings over the current application."""
+
+    rows = _settings_rows(settings)
+    body = urwid.ListBox(
+        urwid.SimpleFocusListWalker([urwid.Text(row, wrap="clip") for row in rows])
+    )
+    close_button = urwid.Button("Close", on_press=on_close)
+    content = urwid.Pile(
+        [
+            ("weight", 1, body),
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Padding(close_button, align="center", width=14)),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content, title=" Settings "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 74),
+        valign="middle",
+        height=("relative", 68),
     )
 
 
@@ -346,6 +421,56 @@ def render_operation_plan_overlay(
     )
 
 
+def render_jobs_overlay(
+    base: urwid.Widget,
+    jobs: tuple[JobRecord, ...],
+    items: tuple[JobItem, ...] = (),
+    *,
+    on_pause: Callable[[urwid.Button], object] | None = None,
+    on_resume: Callable[[urwid.Button], object] | None = None,
+    on_cancel: Callable[[urwid.Button], object] | None = None,
+    on_retry: Callable[[urwid.Button], object] | None = None,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place the durable job monitor over the current application."""
+
+    if jobs:
+        job_rows = [
+            _job_detail_row(job, items if index == 0 else ())
+            for index, job in enumerate(jobs)
+        ]
+    else:
+        job_rows = [urwid.Text(" No durable jobs.")]
+    content = urwid.Pile(
+        [
+            *[("pack", row) for row in job_rows],
+            ("pack", urwid.Divider()),
+            (
+                "pack",
+                urwid.Columns(
+                    [
+                        ("given", 13, urwid.Button("Pause", on_press=on_pause)),
+                        ("given", 13, urwid.Button("Resume", on_press=on_resume)),
+                        ("given", 13, urwid.Button("Cancel", on_press=on_cancel)),
+                        ("given", 13, urwid.Button("Retry", on_press=on_retry)),
+                        ("given", 13, urwid.Button("Close", on_press=on_close)),
+                    ],
+                    dividechars=1,
+                ),
+            ),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content, title=" Jobs "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 86),
+        valign="middle",
+        height=("relative", 76),
+    )
+
+
 def render_location_picker_overlay(
     base: urwid.Widget,
     sources: tuple[KnownSource, ...],
@@ -390,6 +515,7 @@ def _location_header(
     sources: tuple[KnownSource, ...],
     on_location_picker: Callable[[PanelId], object] | None,
     on_bucket_menu: Callable[[urwid.Button], object] | None,
+    on_settings: Callable[[urwid.Button], object] | None,
 ) -> urwid.Widget:
     left_button = urwid.Button(
         "Left",
@@ -402,6 +528,7 @@ def _location_header(
         user_data=(PanelId.RIGHT, on_location_picker),
     )
     bucket_button = urwid.Button("Bucket", on_press=on_bucket_menu)
+    settings_button = urwid.Button("Settings", on_press=on_settings)
     return urwid.AttrMap(
         urwid.Columns(
             [
@@ -409,6 +536,7 @@ def _location_header(
                 ("given", 12, left_button),
                 ("given", 12, right_button),
                 ("given", 14, bucket_button),
+                ("given", 16, settings_button),
                 ("weight", 1, urwid.Text(f" {len(sources)} known location(s)", wrap="clip")),
             ],
             dividechars=1,
@@ -485,6 +613,38 @@ def _emit_bucket_menu_command(
         on_command(UiCommand(command))
 
 
+def _settings_rows(settings: AppSettings) -> tuple[str, ...]:
+    default_s3 = settings.profiles.default_s3
+    named_profiles = ", ".join(profile.name for profile in settings.profiles.s3_profiles) or "none"
+    upload_threshold = _format_bytes(settings.operations.multipart_upload_threshold)
+    download_threshold = _format_bytes(settings.operations.multipart_download_threshold)
+    return (
+        f" Cache root: {settings.cache_root}",
+        f" Default provider: {settings.provider.default_provider}",
+        f" Index TTL: {settings.index.ttl_seconds}s",
+        "",
+        " S3 default profile:",
+        f"   profile: {default_s3.profile_name or 'provider default'}",
+        f"   region: {default_s3.region_name or 'provider default'}",
+        f"   endpoint: {default_s3.endpoint_url or 'provider default'}",
+        f" Named S3 profiles: {named_profiles}",
+        "",
+        " Operations:",
+        f"   max listing concurrency: {settings.operations.max_listing_concurrency}",
+        f"   max transfer concurrency: {settings.operations.max_transfer_concurrency}",
+        f"   multipart upload threshold: {upload_threshold}",
+        f"   multipart download threshold: {download_threshold}",
+        f"   conflict behavior: {settings.operations.default_conflict_behavior}",
+        f"   confirm destructive: {_format_bool(settings.operations.confirm_destructive)}",
+        "",
+        " UI:",
+        f"   theme: {settings.ui.theme}",
+        f"   keymap: {settings.ui.keymap}",
+        f"   show hidden files: {_format_bool(settings.ui.show_hidden_files)}",
+        f"   advanced metadata: {_format_bool(settings.ui.show_advanced_metadata)}",
+    )
+
+
 def _task_footer(tasks: tuple[TaskRecord, ...]) -> urwid.Widget:
     task = _visible_task(tasks)
     if task is None:
@@ -508,6 +668,67 @@ def _task_footer(tasks: tuple[TaskRecord, ...]) -> urwid.Widget:
     if detail:
         parts.append(detail)
     return urwid.AttrMap(urwid.Text(" | ".join(parts), wrap="clip"), _task_footer_attr(task))
+
+
+def _job_footer(
+    jobs: tuple[JobRecord, ...],
+    on_jobs: Callable[[urwid.Button], object] | None,
+) -> urwid.Widget:
+    job = _visible_job(jobs)
+    if job is None:
+        return urwid.AttrMap(urwid.Text(" No durable jobs", wrap="clip"), "task_footer")
+    failed = _failed_item_count(job)
+    total = job.plan.direct_count
+    detail = (
+        f" Jobs: {job.kind.value} {job.status.value} | {job.phase.value} | "
+        f"{total} item{'' if total == 1 else 's'}"
+    )
+    if failed:
+        detail = f"{detail} | {failed} failed"
+    button = urwid.Button(detail, on_press=on_jobs)
+    return urwid.AttrMap(button, _job_footer_attr(job))
+
+
+def _visible_job(jobs: tuple[JobRecord, ...]) -> JobRecord | None:
+    for job in reversed(jobs):
+        if not job.status.is_terminal:
+            return job
+    if jobs:
+        return jobs[-1]
+    return None
+
+
+def _job_footer_attr(job: JobRecord) -> str:
+    if job.status is JobStatus.FAILED:
+        return "error"
+    return "task_footer"
+
+
+def _job_detail_row(job: JobRecord, items: tuple[JobItem, ...]) -> urwid.Widget:
+    failed = sum(item.status is JobItemStatus.FAILED for item in items)
+    retry_count = sum(item.attempts for item in items)
+    source = job.plan.entries[0].location.label if job.plan.entries else "n/a"
+    destination = job.plan.destination.label if job.plan.destination is not None else "n/a"
+    created = _format_datetime(job.created_at)
+    lines = [
+        f" {job.job_id} | {job.kind.value} | {job.status.value} | {job.phase.value}",
+        f"   source: {source}",
+        f"   destination: {destination}",
+        f"   items: {job.plan.direct_count} direct, failed: {failed}, retries: {retry_count}",
+        f"   created: {created}",
+    ]
+    if job.latest_error:
+        lines.append(f"   error: {job.latest_error}")
+    for item in items[:5]:
+        suffix = f" ({item.latest_error})" if item.latest_error else ""
+        lines.append(f"   - {item.name}: {item.status.value}, attempts={item.attempts}{suffix}")
+    return urwid.Pile([("pack", urwid.Text(line, wrap="clip")) for line in lines])
+
+
+def _failed_item_count(job: JobRecord) -> int:
+    if job.status is not JobStatus.FAILED:
+        return 0
+    return sum(1 for entry in job.plan.entries if entry.name)
 
 
 def _visible_task(tasks: tuple[TaskRecord, ...]) -> TaskRecord | None:
@@ -549,6 +770,10 @@ def _format_bytes(value: int) -> str:
     if unit == units[0]:
         return f"{int(size)}{unit}"
     return f"{size:.1f}{unit}"
+
+
+def _format_bool(value: bool) -> str:
+    return "yes" if value else "no"
 
 
 def render_panel(

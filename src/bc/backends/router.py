@@ -33,6 +33,9 @@ class BackendRouter(Backend):
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         return await self._backend_for(location).mkdir(location, parents=parents)
 
+    async def create_file(self, location: Location) -> OperationResult:
+        return await self._backend_for(location).create_file(location)
+
     async def copy(
         self,
         source: Location,

@@ -190,6 +190,9 @@ class AlwaysFailCopyBackend(Backend):
         _ = parents
         return OperationResult.success(destination=location)
 
+    async def create_file(self, location: Location) -> OperationResult:
+        return OperationResult.success(destination=location)
+
     async def copy(
         self,
         source: Location,

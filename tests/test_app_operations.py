@@ -21,6 +21,7 @@ from bc.core.task_manager import ProgressSink
 from bc.index import RecursiveIndexResult
 from bc.index.cache_paths import account_id, index_dir
 from bc.index.parquet_store import ObjectMetadata, ParquetIndexStore
+from bc.jobs import JobStatus, plan_delete
 from bc.ui.commands import PanelId, TwoPanelState
 
 INDEXED_OBJECTS = 2
@@ -129,6 +130,8 @@ class NoopBackend(Backend):
     provider = "noop"
 
     def __init__(self) -> None:
+        self.create_file_calls: list[Location] = []
+        self.mkdir_calls: list[Location] = []
         self.delete_calls: list[tuple[Location, bool]] = []
         self.list_entries: tuple[Entry, ...] = ()
         self.list_calls: list[Location] = []
@@ -150,6 +153,11 @@ class NoopBackend(Backend):
 
     async def mkdir(self, location: Location, *, parents: bool = True) -> OperationResult:
         _ = parents
+        self.mkdir_calls.append(location)
+        return OperationResult.success("created", destination=location)
+
+    async def create_file(self, location: Location) -> OperationResult:
+        self.create_file_calls.append(location)
         return OperationResult.success("created", destination=location)
 
     async def copy(
@@ -413,6 +421,104 @@ def test_cancel_delete_plan_does_not_start_task(tmp_path: Path) -> None:
         assert app._tasks.records() == ()
         assert file_path.exists()
         assert app._state.status_message == "Cancelled delete"
+    finally:
+        app._tasks.close()
+
+
+def test_create_local_file_from_prompt(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path)),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._show_create_prompt("file")
+        app._create_prompt = ("file", "notes.txt")
+        app._apply_create_prompt()
+
+        assert (tmp_path / "notes.txt").is_file()
+        assert [entry.name for entry in app._state.left.entries] == ["..", "notes.txt"]
+    finally:
+        app._tasks.close()
+
+
+def test_create_local_folder_from_prompt(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path)),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._show_create_prompt("folder")
+        app._create_prompt = ("folder", "docs")
+        app._apply_create_prompt()
+
+        assert (tmp_path / "docs").is_dir()
+        assert [entry.name for entry in app._state.left.entries] == ["..", "docs"]
+    finally:
+        app._tasks.close()
+
+
+def test_create_s3_file_and_folder_targets_active_prefix(tmp_path: Path) -> None:
+    backend = NoopBackend()
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    app._backend = backend  # type: ignore[assignment]
+    app._refresh_panel = lambda _panel_id: None  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=S3Location(bucket="bucket-commander", prefix="logs/")),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._create_prompt = ("file", "a.txt")
+        app._apply_create_prompt()
+        app._create_prompt = ("folder", "archive")
+        app._apply_create_prompt()
+
+        assert backend.create_file_calls == [
+            S3Location(bucket="bucket-commander", prefix="logs/a.txt")
+        ]
+        assert backend.mkdir_calls == [
+            S3Location(bucket="bucket-commander", prefix="logs/archive/")
+        ]
+    finally:
+        app._tasks.close()
+
+
+def test_job_monitor_actions_update_durable_job_state(tmp_path: Path) -> None:
+    file_path = tmp_path / "current.txt"
+    file_path.write_text("current", encoding="utf-8")
+    entry = Entry(
+        location=parse_location(file_path),
+        name="current.txt",
+        entry_type=EntryType.FILE,
+    )
+    app = BucketCommanderApp(
+        AppConfig(
+            left=parse_location(tmp_path),
+            right=parse_location(tmp_path),
+            job_store_path=tmp_path / "jobs.sqlite3",
+        )
+    )
+    try:
+        record = app._ensure_job_queue().enqueue(plan_delete((entry,), source_panel="left"))
+
+        app._pause_latest_job()
+        paused = app._ensure_job_store().get_job(record.job_id)
+        assert paused is not None
+        assert paused.status is JobStatus.PAUSED
+
+        app._resume_latest_job()
+        resumed = app._ensure_job_store().get_job(record.job_id)
+        assert resumed is not None
+        assert resumed.status is JobStatus.QUEUED
+
+        app._cancel_latest_job()
+        cancelled = app._ensure_job_store().get_job(record.job_id)
+        assert cancelled is not None
+        assert cancelled.status is JobStatus.CANCELLED
     finally:
         app._tasks.close()
 
