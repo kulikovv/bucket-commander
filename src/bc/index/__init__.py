@@ -18,6 +18,7 @@ from bc.index.panel_cache import CacheBackedBucketPanel, CachedPanelListing
 from bc.index.parquet_store import (
     OBJECT_SCHEMA,
     PREFIX_SCHEMA,
+    CompactionResult,
     CurrentPrefixListing,
     ObjectMetadata,
     ParquetIndexStore,
@@ -39,6 +40,7 @@ __all__ = [
     "CacheBackedBucketPanel",
     "CachedPanelListing",
     "CheckpointStore",
+    "CompactionResult",
     "CoveredPrefix",
     "CurrentPrefixListing",
     "IndexFile",

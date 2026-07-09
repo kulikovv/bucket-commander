@@ -678,10 +678,11 @@ class BucketCommanderApp:
         if not plan.entries:
             self._update(self._state.with_status("No entries to move"))
             return
+
         def executor() -> None:
             self._execute_move_tasks(entries, destination)
 
-        self._show_operation_plan(plan, executor)
+        self._confirm_or_execute(plan, executor)
 
     def _execute_move_tasks(self, entries: tuple[Entry, ...], destination: Location) -> None:
         started = 0
@@ -715,10 +716,11 @@ class BucketCommanderApp:
         if not plan.entries:
             self._update(self._state.with_status("No entries to delete"))
             return
+
         def executor() -> None:
             self._execute_delete_tasks(entries)
 
-        self._show_operation_plan(plan, executor)
+        self._confirm_or_execute(plan, executor)
 
     def _execute_delete_tasks(self, entries: tuple[Entry, ...]) -> None:
         started = 0
@@ -754,6 +756,14 @@ class BucketCommanderApp:
                 f"{'' if plan.direct_count == 1 else 's'}"
             )
         )
+
+    def _confirm_or_execute(self, plan: OperationPlan, executor: Callable[[], None]) -> None:
+        """Apply destructive confirmation policy from resolved application settings."""
+
+        if plan.requires_confirmation and self._settings.operations.confirm_destructive:
+            self._show_operation_plan(plan, executor)
+            return
+        executor()
 
     def _start_index_task(self) -> None:
         target = self._index_target()

@@ -204,6 +204,25 @@ class IndexManifest:
             last_successful_checkpoint=checkpoint,
         )
 
+    def with_active_files(
+        self,
+        *,
+        object_files: tuple[IndexFile, ...],
+        prefix_files: tuple[IndexFile, ...],
+        now: datetime | None = None,
+        indexing_mode: str | None = None,
+    ) -> IndexManifest:
+        """Replace active Parquet file pointers after a successful compaction."""
+
+        updated = _normalize_datetime(now or datetime.now(UTC))
+        return replace(
+            self,
+            updated_at=updated,
+            indexing_history=_append_optional(self.indexing_history, indexing_mode),
+            object_files=object_files,
+            prefix_files=prefix_files,
+        )
+
     def to_json(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,

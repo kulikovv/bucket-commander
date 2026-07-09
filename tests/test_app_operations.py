@@ -5,6 +5,7 @@ from pathlib import Path
 from bc.app import AppConfig, BucketCommanderApp
 from bc.backends import Backend
 from bc.backends.base import PreviewResult
+from bc.config import AppSettings, OperationSettings
 from bc.core import (
     Entry,
     EntryType,
@@ -393,6 +394,45 @@ def test_delete_task_starts_for_s3_entries(tmp_path: Path) -> None:
         assert len(records) == 1
         assert records[0].task_type is TaskType.DELETE
         assert records[0].source == entry.location
+        wait_for_task(app._tasks, records[0].task_id)
+        assert backend.delete_calls == [(entry.location, False)]
+    finally:
+        app._tasks.close()
+
+
+def test_delete_task_skips_plan_when_destructive_confirmation_disabled(tmp_path: Path) -> None:
+    entry = Entry(
+        location=S3Location(bucket="bucket-commander", prefix="logs/a.txt"),
+        name="a.txt",
+        entry_type=EntryType.OBJECT,
+    )
+    settings = AppSettings(
+        cache_root=tmp_path / "cache",
+        operations=OperationSettings(confirm_destructive=False),
+    )
+    app = BucketCommanderApp(
+        AppConfig(
+            left=S3Location(bucket="bucket-commander", prefix="logs/"),
+            right=parse_location(tmp_path),
+            settings=settings,
+        )
+    )
+    backend = NoopBackend()
+    app._backend = backend  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(
+                location=S3Location(bucket="bucket-commander", prefix="logs/"),
+                entries=(entry,),
+            ),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+
+        app._start_delete_tasks()
+
+        assert app._pending_operation_plan is None
+        records = app._tasks.records()
+        assert len(records) == 1
         wait_for_task(app._tasks, records[0].task_id)
         assert backend.delete_calls == [(entry.location, False)]
     finally:

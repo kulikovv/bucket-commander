@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,8 @@ import pyarrow.parquet as pq
 
 from bc.core import Entry, EntryType, S3Location
 from bc.index.manifest import IndexFile, IndexManifest, ManifestStore
+
+logger = logging.getLogger(__name__)
 
 OBJECT_SCHEMA = pa.schema(
     [
@@ -181,6 +184,20 @@ class CurrentPrefixListing:
 
 
 @dataclass(frozen=True, slots=True)
+class CompactionResult:
+    """Summary of a metadata index compaction run."""
+
+    object_rows_before: int
+    object_rows_after: int
+    prefix_rows_before: int
+    prefix_rows_after: int
+    object_files_before: int
+    object_files_after: int
+    prefix_files_before: int
+    prefix_files_after: int
+
+
+@dataclass(frozen=True, slots=True)
 class ParquetIndexStore:
     """Read and append bucket metadata under one index directory."""
 
@@ -318,6 +335,7 @@ class ParquetIndexStore:
             key_fields=("bucket", "key", "version_id"),
             timestamp_fields=("refreshed_at", "discovered_at"),
         )
+        objects = tuple(row for row in objects if not bool(row.get("is_delete_marker")))
         prefixes = _latest_by_identity(
             _read_prefix_rows(self.index_dir, manifest.prefix_files, normalized_prefix),
             key_fields=("bucket", "prefix"),
@@ -327,6 +345,89 @@ class ParquetIndexStore:
             prefix=normalized_prefix,
             objects=tuple(_object_from_row(row) for row in objects),
             prefixes=tuple(_prefix_from_row(row) for row in prefixes),
+        )
+
+    def compact(self, *, indexing_mode: str = "compaction") -> CompactionResult:
+        """Rewrite active Parquet files to newest rows and tombstone-free objects."""
+
+        manifest = self.load_manifest()
+        object_rows = _read_all_object_rows(self.index_dir, manifest.object_files)
+        prefix_rows = _read_all_prefix_rows(self.index_dir, manifest.prefix_files)
+        latest_objects = _latest_by_identity(
+            object_rows,
+            key_fields=("bucket", "key", "version_id"),
+            timestamp_fields=("refreshed_at", "discovered_at"),
+        )
+        compacted_objects = tuple(
+            _object_from_row(row) for row in latest_objects if not bool(row.get("is_delete_marker"))
+        )
+        compacted_prefixes = tuple(
+            _prefix_from_row(row)
+            for row in _latest_by_identity(
+                prefix_rows,
+                key_fields=("bucket", "prefix"),
+                timestamp_fields=("recursive_indexed_at", "listed_at"),
+            )
+        )
+        object_files = self._write_compacted_objects(compacted_objects)
+        prefix_files = self._write_compacted_prefixes(compacted_prefixes)
+        self.manifest_store.save(
+            manifest.with_active_files(
+                object_files=object_files,
+                prefix_files=prefix_files,
+                indexing_mode=indexing_mode,
+            )
+        )
+        logger.info(
+            "Compacted bucket index",
+            extra={
+                "bucket": manifest.bucket,
+                "object_rows_before": len(object_rows),
+                "object_rows_after": len(compacted_objects),
+                "prefix_rows_before": len(prefix_rows),
+                "prefix_rows_after": len(compacted_prefixes),
+            },
+        )
+        return CompactionResult(
+            object_rows_before=len(object_rows),
+            object_rows_after=len(compacted_objects),
+            prefix_rows_before=len(prefix_rows),
+            prefix_rows_after=len(compacted_prefixes),
+            object_files_before=len(manifest.object_files),
+            object_files_after=len(object_files),
+            prefix_files_before=len(manifest.prefix_files),
+            prefix_files_after=len(prefix_files),
+        )
+
+    def _write_compacted_objects(self, rows: tuple[ObjectMetadata, ...]) -> tuple[IndexFile, ...]:
+        written_files: list[IndexFile] = []
+        for partition_hash, partition_rows in _group_objects_by_partition(rows).items():
+            relative_path = (
+                Path("objects")
+                / f"partition_prefix_hash={partition_hash}"
+                / f"compact-{uuid4().hex}.parquet"
+            )
+            _write_table(self.index_dir / relative_path, _objects_to_table(partition_rows))
+            written_files.append(
+                IndexFile(
+                    path=relative_path.as_posix(),
+                    row_count=len(partition_rows),
+                    created_at=datetime.now(UTC),
+                )
+            )
+        return tuple(written_files)
+
+    def _write_compacted_prefixes(self, rows: tuple[PrefixMetadata, ...]) -> tuple[IndexFile, ...]:
+        if not rows:
+            return ()
+        relative_path = Path("prefixes") / f"compact-{uuid4().hex}.parquet"
+        _write_table(self.index_dir / relative_path, _prefixes_to_table(rows))
+        return (
+            IndexFile(
+                path=relative_path.as_posix(),
+                row_count=len(rows),
+                created_at=datetime.now(UTC),
+            ),
         )
 
 
@@ -428,6 +529,26 @@ def _read_prefix_rows(
             filters=[("parent_prefix", "=", parent_prefix)],
         )
         rows.extend(_table_to_rows(table))
+    return rows
+
+
+def _read_all_object_rows(
+    index_dir: Path,
+    files: tuple[IndexFile, ...],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for file in files:
+        rows.extend(_table_to_rows(pq.read_table(index_dir / file.path)))  # type: ignore[no-untyped-call]
+    return rows
+
+
+def _read_all_prefix_rows(
+    index_dir: Path,
+    files: tuple[IndexFile, ...],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for file in files:
+        rows.extend(_table_to_rows(pq.read_table(index_dir / file.path)))  # type: ignore[no-untyped-call]
     return rows
 
 

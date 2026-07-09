@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ import duckdb
 from bc.core import Entry, EntryType, S3Location, SortField, SortOrder
 from bc.index.cache_paths import default_cache_root, index_dir
 from bc.index.manifest import CoveredPrefix, IndexFile, IndexManifest, ManifestStore
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_QUERY_LIMIT = 500
 DEFAULT_INDEX_STALE_TTL = timedelta(hours=24)
@@ -100,7 +103,10 @@ class IndexedBucketQuery:
                 is_stale=False,
                 coverage_message="index empty",
             )
-        manifest = manifest_store.load()
+        try:
+            manifest = manifest_store.load()
+        except (OSError, ValueError, TypeError, duckdb.Error) as error:
+            return _damaged_index_result(error, limit=limit, offset=offset)
         query_prefix = _criteria_prefix(location, criteria)
         files = (*manifest.object_files, *manifest.prefix_files)
         if not files:
@@ -117,18 +123,21 @@ class IndexedBucketQuery:
                     stale_ttl=self._stale_ttl(manifest),
                 ),
             )
-        return _execute_query(
-            location,
-            manifest,
-            criteria=criteria,
-            query_prefix=query_prefix,
-            sort_field=sort_field,
-            sort_order=sort_order,
-            limit=_valid_limit(limit),
-            offset=max(0, offset),
-            index_dir=manifest_store.index_dir,
-            stale_ttl=self._stale_ttl(manifest),
-        )
+        try:
+            return _execute_query(
+                location,
+                manifest,
+                criteria=criteria,
+                query_prefix=query_prefix,
+                sort_field=sort_field,
+                sort_order=sort_order,
+                limit=_valid_limit(limit),
+                offset=max(0, offset),
+                index_dir=manifest_store.index_dir,
+                stale_ttl=self._stale_ttl(manifest),
+            )
+        except (OSError, ValueError, TypeError, duckdb.Error) as error:
+            return _damaged_index_result(error, limit=limit, offset=offset)
 
     def _stale_ttl(self, manifest: IndexManifest) -> timedelta:
         if manifest.stale_ttl_seconds is None:
@@ -173,6 +182,19 @@ def parse_indexed_search_query(text: str) -> IndexedSearchCriteria:
         max_size=max_size,
         modified_after=modified_after,
         modified_before=modified_before,
+    )
+
+
+def _damaged_index_result(error: Exception, *, limit: int, offset: int) -> IndexedSearchResult:
+    logger.warning("Ignoring damaged bucket index", extra={"error_type": type(error).__name__})
+    return IndexedSearchResult(
+        entries=(),
+        total_count=0,
+        offset=max(0, offset),
+        limit=_valid_limit(limit),
+        is_partial=True,
+        is_stale=True,
+        coverage_message="index damaged; refresh live, rebuild prefix, or rebuild bucket",
     )
 
 
