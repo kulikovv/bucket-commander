@@ -19,7 +19,7 @@ from bc.core import parse_location
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bucket-commander",
+        prog="bc",
         description="Two-panel terminal file manager for local files and object-storage buckets.",
     )
     parser.add_argument(

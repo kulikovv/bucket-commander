@@ -133,4 +133,4 @@ def test_cli_version_action(capsys) -> None:  # type: ignore[no-untyped-def]
 
     captured = capsys.readouterr()
 
-    assert "bucket-commander" in captured.out
+    assert "bc" in captured.out
