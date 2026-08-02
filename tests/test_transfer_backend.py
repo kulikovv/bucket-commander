@@ -13,6 +13,11 @@ class FakeTransferS3Client:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
 
+    async def list_buckets(self, **kwargs: object) -> Mapping[str, object]:
+        _ = kwargs
+        buckets = sorted({key.split("/", maxsplit=1)[0] for key in self.objects})
+        return {"Buckets": [{"Name": name} for name in buckets]}
+
     async def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
         bucket = str(kwargs["Bucket"])
         prefix = str(kwargs.get("Prefix", ""))

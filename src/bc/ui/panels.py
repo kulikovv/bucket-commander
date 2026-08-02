@@ -223,6 +223,36 @@ def render_view_overlay(
     )
 
 
+def render_message_overlay(
+    base: urwid.Widget,
+    *,
+    title: str,
+    content: str,
+    on_close: Callable[[urwid.Button], object] | None = None,
+) -> urwid.Widget:
+    """Place a dismissible notification dialog over the current application."""
+
+    lines = content.splitlines() or [""]
+    body = urwid.Pile([("pack", urwid.Text(line)) for line in lines])
+    close_button = urwid.Button("Close", on_press=on_close)
+    content_widget = urwid.Pile(
+        [
+            ("pack", body),
+            ("pack", urwid.Divider()),
+            ("pack", urwid.Padding(close_button, align="center", width=14)),
+        ]
+    )
+    dialog = urwid.AttrMap(urwid.LineBox(content_widget, title=f" {title} "), "dialog")
+    return urwid.Overlay(
+        top_w=dialog,
+        bottom_w=base,
+        align="center",
+        width=("relative", 70),
+        valign="middle",
+        height="pack",
+    )
+
+
 def render_search_overlay(
     base: urwid.Widget,
     *,
@@ -436,8 +466,7 @@ def render_jobs_overlay(
 
     if jobs:
         job_rows = [
-            _job_detail_row(job, items if index == 0 else ())
-            for index, job in enumerate(jobs)
+            _job_detail_row(job, items if index == 0 else ()) for index, job in enumerate(jobs)
         ]
     else:
         job_rows = [urwid.Text(" No durable jobs.")]

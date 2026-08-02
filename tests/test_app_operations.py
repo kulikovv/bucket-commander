@@ -563,6 +563,27 @@ def test_job_monitor_actions_update_durable_job_state(tmp_path: Path) -> None:
         app._tasks.close()
 
 
+def test_startup_notice_opens_modal_and_closes_on_enter(tmp_path: Path) -> None:
+    app = BucketCommanderApp(
+        AppConfig(
+            left=parse_location(tmp_path),
+            right=parse_location(tmp_path),
+            cache_root=tmp_path / "cache",
+            startup_notice="Bucket discovery failed: access denied",
+        )
+    )
+    try:
+        assert app._startup_notice == "Bucket discovery failed: access denied"
+        assert app._handle_modal_key("down") is True
+        assert app._startup_notice is not None
+
+        assert app._handle_modal_key("enter") is True
+
+        assert app._startup_notice is None
+    finally:
+        app._tasks.close()
+
+
 def test_view_current_entry_opens_preview_dialog(tmp_path: Path) -> None:
     file_path = tmp_path / "document.txt"
     file_path.write_text("hello", encoding="utf-8")

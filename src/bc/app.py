@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -73,6 +73,7 @@ from bc.ui.panels import (
     render_help_overlay,
     render_jobs_overlay,
     render_location_picker_overlay,
+    render_message_overlay,
     render_name_prompt_overlay,
     render_operation_plan_overlay,
     render_search_overlay,
@@ -95,6 +96,7 @@ class AppConfig:
     settings: AppSettings = field(default_factory=AppSettings.defaults)
     cache_root: Path | None = None
     job_store_path: Path | None = None
+    startup_notice: str | None = None
 
     @classmethod
     def from_paths(cls, *, left: Path, right: Path) -> AppConfig:
@@ -119,6 +121,7 @@ class BucketCommanderApp:
         )
         self._loop: urwid.MainLoop | None = None
         self._settings = config.settings
+        self._startup_notice = config.startup_notice
         self._is_help_open = False
         self._view_dialog: tuple[str, str] | None = None
         self._is_jobs_open = False
@@ -164,6 +167,8 @@ class BucketCommanderApp:
             self._loop.run()
             return 0
         finally:
+            with contextlib.suppress(Exception):
+                self._tasks.run_blocking(self._s3_backend.aclose())
             self._tasks.close()
 
     def _handle_key(self, key: str | tuple[str, int, int, int]) -> None:
@@ -183,7 +188,8 @@ class BucketCommanderApp:
 
     def _handle_modal_key(self, key: str) -> bool:
         return (
-            self._handle_help_key(key)
+            self._handle_startup_notice_key(key)
+            or self._handle_help_key(key)
             or self._handle_view_key(key)
             or self._handle_jobs_key(key)
             or self._handle_settings_key(key)
@@ -225,6 +231,13 @@ class BucketCommanderApp:
             if handler is None:
                 return False
             handler()
+        return True
+
+    def _handle_startup_notice_key(self, key: str) -> bool:
+        if self._startup_notice is None:
+            return False
+        if key in {"q", "Q", "esc", "enter"}:
+            self._close_startup_notice()
         return True
 
     def _handle_help_key(self, key: str) -> bool:
@@ -396,7 +409,7 @@ class BucketCommanderApp:
 
     def _refresh_s3_panel(self, panel_id: PanelId, location: S3Location) -> None:
         try:
-            cached = asyncio.run(self._bucket_cache.load_cached(location))
+            cached = self._tasks.run_blocking(self._bucket_cache.load_cached(location))
         except BackendError as error:
             self._update(self._state.with_status(str(error)))
             return
@@ -447,6 +460,10 @@ class BucketCommanderApp:
         return loading_state.with_panel(panel_id, refreshed_panel).with_status(
             f"{location.label}: {len(entries)} live entries ({cache_status})"
         )
+
+    def _close_startup_notice(self, _button: urwid.Button | None = None) -> None:
+        self._startup_notice = None
+        self._redraw()
 
     def _show_help_dialog(self, _button: urwid.Button | None = None) -> None:
         self._is_help_open = True
@@ -513,9 +530,9 @@ class BucketCommanderApp:
             return
         try:
             if kind == "file":
-                asyncio.run(self._backend.create_file(target))
+                self._tasks.run_blocking(self._backend.create_file(target))
             else:
-                asyncio.run(self._backend.mkdir(target))
+                self._tasks.run_blocking(self._backend.mkdir(target))
         except BackendError as error:
             self._update(self._state.with_status(str(error)))
             return
@@ -619,7 +636,9 @@ class BucketCommanderApp:
 
     def _run_view_command(self, entry: Entry) -> None:
         try:
-            preview = asyncio.run(self._backend.preview(entry.location, max_bytes=VIEW_MAX_BYTES))
+            preview = self._tasks.run_blocking(
+                self._backend.preview(entry.location, max_bytes=VIEW_MAX_BYTES)
+            )
         except BackendError as error:
             self._update(self._state.with_status(str(error)))
             return
@@ -809,7 +828,7 @@ class BucketCommanderApp:
             self._update(self._state.with_status("Indexed search is only available for S3"))
             return
         try:
-            result = asyncio.run(
+            result = self._tasks.run_blocking(
                 self._bucket_query.search(
                     panel.location,
                     criteria=parse_indexed_search_query(query),
@@ -902,7 +921,7 @@ class BucketCommanderApp:
 
     def _run_command(self, command: Callable[[], Coroutine[Any, Any, TwoPanelState]]) -> None:
         try:
-            state: TwoPanelState = asyncio.run(command())
+            state: TwoPanelState = self._tasks.run_blocking(command())
         except BackendError as error:
             self._update(self._state.with_status(str(error)))
             return
@@ -933,7 +952,14 @@ class BucketCommanderApp:
             panel_focus_rows=self._panel_focus_rows,
         )
         widget = app
-        if self._is_help_open:
+        if self._startup_notice is not None:
+            widget = render_message_overlay(
+                app,
+                title="Startup Warning",
+                content=self._startup_notice,
+                on_close=self._close_startup_notice,
+            )
+        elif self._is_help_open:
             widget = render_help_overlay(app, on_close=self._close_help_dialog)
         elif self._view_dialog is not None:
             title, content = self._view_dialog

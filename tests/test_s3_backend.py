@@ -15,11 +15,20 @@ PREFIX_DELETE_COUNT = 2
 
 
 class FakeS3Client:
-    def __init__(self, pages: tuple[Mapping[str, object], ...]) -> None:
+    def __init__(
+        self,
+        pages: tuple[Mapping[str, object], ...],
+        buckets: tuple[str, ...] = (),
+    ) -> None:
         self._pages = pages
+        self._buckets = buckets
         self.list_requests: list[dict[str, object]] = []
         self.delete_requests: list[dict[str, object]] = []
         self.upload_requests: list[tuple[str, str, bytes]] = []
+
+    async def list_buckets(self, **kwargs: object) -> Mapping[str, object]:
+        _ = kwargs
+        return {"Buckets": [{"Name": name} for name in self._buckets]}
 
     async def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
         self.list_requests.append(dict(kwargs))
@@ -69,6 +78,7 @@ class FakeBody:
 class FakeS3ClientContext:
     def __init__(self, client: FakeS3Client) -> None:
         self._client = client
+        self.exited = False
 
     async def __aenter__(self) -> FakeS3Client:
         return self._client
@@ -79,6 +89,7 @@ class FakeS3ClientContext:
         exc: BaseException | None,
         traceback: object | None,
     ) -> bool | None:
+        self.exited = True
         return None
 
 
@@ -86,6 +97,7 @@ class RecordingClientFactory:
     def __init__(self, client: FakeS3Client) -> None:
         self._client = client
         self.calls: list[dict[str, str | None]] = []
+        self.contexts: list[FakeS3ClientContext] = []
 
     def __call__(
         self,
@@ -101,7 +113,9 @@ class RecordingClientFactory:
                 "endpoint_url": endpoint_url,
             }
         )
-        return FakeS3ClientContext(self._client)
+        context = FakeS3ClientContext(self._client)
+        self.contexts.append(context)
+        return context
 
 
 def test_list_returns_common_prefixes_and_objects_from_all_pages() -> None:
@@ -200,6 +214,65 @@ def test_location_profile_and_region_override_backend_defaults() -> None:
     ]
 
 
+def test_client_is_reused_across_calls_and_closed_by_aclose() -> None:
+    empty_page: dict[str, object] = {"Contents": [], "IsTruncated": False}
+    client = FakeS3Client((empty_page, empty_page))
+    factory = RecordingClientFactory(client)
+    backend = S3Backend(client_factory=factory)
+    location = S3Location(bucket="example-bucket", prefix="logs/")
+
+    async def scenario() -> None:
+        await backend.list(location)
+        await backend.list(location)
+        await backend.aclose()
+
+    run_async(scenario())
+
+    assert len(factory.calls) == 1
+    assert [context.exited for context in factory.contexts] == [True]
+
+
+def test_distinct_connection_settings_use_distinct_clients() -> None:
+    empty_page: dict[str, object] = {"Contents": [], "IsTruncated": False}
+    client = FakeS3Client((empty_page, empty_page))
+    factory = RecordingClientFactory(client)
+    backend = S3Backend(client_factory=factory)
+
+    async def scenario() -> None:
+        await backend.list(S3Location(bucket="example-bucket", prefix="logs/", profile="alpha"))
+        await backend.list(S3Location(bucket="example-bucket", prefix="logs/", profile="beta"))
+        await backend.aclose()
+
+    run_async(scenario())
+
+    assert [call["profile_name"] for call in factory.calls] == ["alpha", "beta"]
+    assert [context.exited for context in factory.contexts] == [True, True]
+
+
+def test_list_buckets_returns_sorted_names_using_backend_defaults() -> None:
+    client = FakeS3Client((), buckets=("beta", "alpha"))
+    factory = RecordingClientFactory(client)
+    backend = S3Backend(
+        S3BackendConfig(
+            profile_name="default-profile",
+            region_name="us-east-1",
+            endpoint_url="http://localhost:9000",
+        ),
+        client_factory=factory,
+    )
+
+    names = run_async(backend.list_buckets())
+
+    assert names == ("alpha", "beta")
+    assert factory.calls == [
+        {
+            "profile_name": "default-profile",
+            "region_name": "us-east-1",
+            "endpoint_url": "http://localhost:9000",
+        }
+    ]
+
+
 def test_s3_entries_preserve_location_connection_metadata() -> None:
     client = FakeS3Client(
         (
@@ -222,9 +295,7 @@ def test_s3_entries_preserve_location_connection_metadata() -> None:
     entries = run_async(backend.list(location))
 
     assert {
-        entry.location.endpoint_url
-        for entry in entries
-        if isinstance(entry.location, S3Location)
+        entry.location.endpoint_url for entry in entries if isinstance(entry.location, S3Location)
     } == {"http://127.0.0.1:9000"}
 
 

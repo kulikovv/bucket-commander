@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import itertools
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any, TypeVar
 
 from bc.core.locations import Location
 from bc.core.models import OperationResult
@@ -161,6 +162,7 @@ class TaskContext:
 
 
 TaskRunner = Callable[[TaskContext], Awaitable[OperationResult | None]]
+ResultT = TypeVar("ResultT")
 
 
 class TaskManager:
@@ -210,6 +212,16 @@ class TaskManager:
         with self._lock:
             self._futures[task_id] = future
         return task_id
+
+    def run_blocking(self, coro: Coroutine[Any, Any, ResultT]) -> ResultT:
+        """Run a coroutine on the manager's persistent event loop and wait for it.
+
+        Sharing one long-lived loop lets backends reuse cached network clients
+        across calls. Must not be called from the loop thread itself.
+        """
+
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
 
     def cancel(self, task_id: str) -> bool:
         """Request cooperative cancellation for a running task."""

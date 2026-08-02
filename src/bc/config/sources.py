@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -93,6 +93,63 @@ def project_sources_config_path() -> Path:
     """Return the repo-local known-source config path for development runs."""
 
     return Path.cwd() / "config" / "sources.toml"
+
+
+def resolve_sources_config_path(path: Path | None = None) -> Path:
+    """Return the known-source config path an explicit or discovered load would use."""
+
+    return path or _discover_sources_config_path()
+
+
+def discovered_bucket_sources(
+    bucket_names: Iterable[str],
+    *,
+    profile: str | None = None,
+    region: str | None = None,
+    endpoint_url: str | None = None,
+) -> tuple[KnownSource, ...]:
+    """Build known-source entries for buckets discovered in a provider account."""
+
+    return tuple(
+        KnownSource(
+            name=name,
+            location=S3Location(
+                bucket=name,
+                profile=profile,
+                region=region,
+                endpoint_url=endpoint_url,
+            ),
+        )
+        for name in sorted(set(bucket_names))
+    )
+
+
+def write_sources_config(path: Path, config: SourcesConfig) -> None:
+    """Write known sources as TOML routing metadata; entries never carry credentials."""
+
+    lines = ["# Known sources for Bucket Commander. Do not store credentials here.", ""]
+    for source in config.sources:
+        lines.append("[[sources]]")
+        lines.append(f"name = {_toml_string(source.name)}")
+        lines.append(f"uri = {_toml_string(source.location.uri)}")
+        if isinstance(source.location, S3Location):
+            for key, value in (
+                ("profile", source.location.profile),
+                ("region", source.location.region),
+                ("endpoint_url", source.location.endpoint_url),
+            ):
+                if value is not None:
+                    lines.append(f"{key} = {_toml_string(value)}")
+        if source.credential_source != "default-chain":
+            lines.append(f"credential_source = {_toml_string(source.credential_source)}")
+        lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _toml_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def load_sources_config(path: Path | None = None) -> SourcesConfig:

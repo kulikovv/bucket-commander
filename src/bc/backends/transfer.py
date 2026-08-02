@@ -115,14 +115,14 @@ class TransferBackend(Backend):
             current_item=str(source.path),
             message=f"Uploading {source.path.name}",
         )
-        async with self._s3._client(destination) as client:
-            for path, relative_key, size in files:
-                _progress_raise_if_cancelled(progress)
-                key = _join_s3_key(destination.prefix, relative_key)
-                _progress_update(progress, current_item=f"{path} -> s3://{destination.bucket}/{key}")
-                await _upload_file(client, path, destination.bucket, key)
-                await _delete_parent_keep_marker(client, destination.bucket, key)
-                _progress_advance(progress, items=1, bytes_count=size)
+        client = await self._s3.acquire_client(destination)
+        for path, relative_key, size in files:
+            _progress_raise_if_cancelled(progress)
+            key = _join_s3_key(destination.prefix, relative_key)
+            _progress_update(progress, current_item=f"{path} -> s3://{destination.bucket}/{key}")
+            await _upload_file(client, path, destination.bucket, key)
+            await _delete_parent_keep_marker(client, destination.bucket, key)
+            _progress_advance(progress, items=1, bytes_count=size)
         return OperationResult.success(
             f"Copied {source.uri} to {destination.uri}",
             source=source,
@@ -159,14 +159,14 @@ class TransferBackend(Backend):
             message=f"Downloading {source.name}",
         )
         target_root = await asyncio.to_thread(_resolve_local_destination, source, destination.path)
-        async with self._s3._client(source) as client:
-            for key, size in objects:
-                _progress_raise_if_cancelled(progress)
-                target = target_root / _relative_s3_download_path(source, key)
-                _progress_update(progress, current_item=f"s3://{source.bucket}/{key} -> {target}")
-                await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-                await _download_file(client, source.bucket, key, target)
-                _progress_advance(progress, items=1, bytes_count=size)
+        client = await self._s3.acquire_client(source)
+        for key, size in objects:
+            _progress_raise_if_cancelled(progress)
+            target = target_root / _relative_s3_download_path(source, key)
+            _progress_update(progress, current_item=f"s3://{source.bucket}/{key} -> {target}")
+            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            await _download_file(client, source.bucket, key, target)
+            _progress_advance(progress, items=1, bytes_count=size)
         return OperationResult.success(
             f"Copied {source.uri} to {destination.uri}",
             source=source,
@@ -203,24 +203,24 @@ class TransferBackend(Backend):
             current_item=source.uri,
             message=f"Copying {source.name}",
         )
-        async with self._s3._client(destination) as client:
-            for key, size in objects:
-                _progress_raise_if_cancelled(progress)
-                target_key = _join_s3_key(
-                    destination.prefix,
-                    _relative_s3_copy_key(source, key),
-                )
-                _progress_update(
-                    progress,
-                    current_item=f"s3://{source.bucket}/{key} -> s3://{destination.bucket}/{target_key}",
-                )
-                await client.copy_object(
-                    CopySource={"Bucket": source.bucket, "Key": key},
-                    Bucket=destination.bucket,
-                    Key=target_key,
-                )
-                await _delete_parent_keep_marker(client, destination.bucket, target_key)
-                _progress_advance(progress, items=1, bytes_count=size)
+        client = await self._s3.acquire_client(destination)
+        for key, size in objects:
+            _progress_raise_if_cancelled(progress)
+            target_key = _join_s3_key(
+                destination.prefix,
+                _relative_s3_copy_key(source, key),
+            )
+            _progress_update(
+                progress,
+                current_item=f"s3://{source.bucket}/{key} -> s3://{destination.bucket}/{target_key}",
+            )
+            await client.copy_object(
+                CopySource={"Bucket": source.bucket, "Key": key},
+                Bucket=destination.bucket,
+                Key=target_key,
+            )
+            await _delete_parent_keep_marker(client, destination.bucket, target_key)
+            _progress_advance(progress, items=1, bytes_count=size)
         return OperationResult.success(
             f"Copied {source.uri} to {destination.uri}",
             source=source,
@@ -232,10 +232,10 @@ class TransferBackend(Backend):
     async def _s3_objects(self, source: S3Location) -> tuple[tuple[str, int], ...]:
         prefix = source.prefix
         objects: list[tuple[str, int]] = []
-        async with self._s3._client(source) as client:
-            objects.extend(await _list_s3_objects(client, source.bucket, prefix))
-            if not objects and prefix.endswith("/"):
-                objects.extend(await _list_s3_objects(client, source.bucket, prefix.rstrip("/")))
+        client = await self._s3.acquire_client(source)
+        objects.extend(await _list_s3_objects(client, source.bucket, prefix))
+        if not objects and prefix.endswith("/"):
+            objects.extend(await _list_s3_objects(client, source.bucket, prefix.rstrip("/")))
         return tuple(objects)
 
 

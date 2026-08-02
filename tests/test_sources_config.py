@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from bc.config import SourcesConfigError, load_sources_config
+from bc.config import (
+    KnownSource,
+    SourcesConfig,
+    SourcesConfigError,
+    discovered_bucket_sources,
+    load_sources_config,
+    write_sources_config,
+)
 from bc.core import S3Location
 
 
@@ -53,6 +60,55 @@ uri = "{local_path}"
 
 def test_load_sources_config_missing_file_is_empty(tmp_path: Path) -> None:
     assert load_sources_config(tmp_path / "missing.toml").sources == ()
+
+
+def test_discovered_bucket_sources_sorts_and_deduplicates_names() -> None:
+    sources = discovered_bucket_sources(
+        ("logs", "data", "logs"),
+        profile="dev",
+        region="us-east-1",
+        endpoint_url="http://127.0.0.1:9000",
+    )
+
+    assert [source.name for source in sources] == ["data", "logs"]
+    location = sources[0].location
+    assert isinstance(location, S3Location)
+    assert location.uri == "s3://data/"
+    assert location.profile == "dev"
+    assert location.region == "us-east-1"
+    assert location.endpoint_url == "http://127.0.0.1:9000"
+
+
+def test_write_sources_config_round_trips(tmp_path: Path) -> None:
+    config = SourcesConfig(
+        sources=discovered_bucket_sources(
+            ("logs", "data"),
+            region="us-east-1",
+            endpoint_url="http://127.0.0.1:9000",
+        )
+    )
+    config_path = tmp_path / "nested" / "sources.toml"
+
+    write_sources_config(config_path, config)
+
+    assert load_sources_config(config_path) == config
+
+
+def test_write_sources_config_escapes_special_characters(tmp_path: Path) -> None:
+    config = SourcesConfig(
+        sources=(
+            KnownSource(
+                name='Bucket "quoted" \\ escaped',
+                location=S3Location(bucket="plain"),
+            ),
+        )
+    )
+    config_path = tmp_path / "sources.toml"
+
+    write_sources_config(config_path, config)
+
+    loaded = load_sources_config(config_path)
+    assert loaded.sources[0].name == 'Bucket "quoted" \\ escaped'
 
 
 def test_load_sources_config_rejects_explicit_credentials(tmp_path: Path) -> None:

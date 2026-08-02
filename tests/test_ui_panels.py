@@ -25,6 +25,7 @@ from bc.ui.panels import (
     render_help_overlay,
     render_jobs_overlay,
     render_location_picker_overlay,
+    render_message_overlay,
     render_name_prompt_overlay,
     render_operation_plan_overlay,
     render_search_overlay,
@@ -259,6 +260,25 @@ def test_render_search_overlay_shows_query(tmp_path: Path) -> None:
     assert "Indexed Search" in rendered
     assert "Query: error" in rendered
     assert "< Search" in rendered
+    assert "< Close" in rendered
+
+
+def test_render_message_overlay_shows_title_and_content(tmp_path: Path) -> None:
+    state = TwoPanelState(
+        left=PanelState(location=parse_location(tmp_path)),
+        right=PanelState(location=parse_location(tmp_path)),
+    )
+
+    rendered = render_text(
+        render_message_overlay(
+            render_app(state),
+            title="Startup Warning",
+            content="Bucket discovery failed: access denied",
+        )
+    )
+
+    assert "Startup Warning" in rendered
+    assert "Bucket discovery failed: access denied" in rendered
     assert "< Close" in rendered
 
 

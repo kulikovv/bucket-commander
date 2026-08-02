@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
+import threading
+import weakref
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +22,9 @@ KEEP_MARKER_NAME = ".keep"
 
 class S3Client(Protocol):
     """Minimal async S3 client surface used by the browser backend."""
+
+    async def list_buckets(self, **kwargs: object) -> Mapping[str, object]:
+        """Return one `ListBuckets` response."""
 
     async def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
         """Return one `ListObjectsV2` response page."""
@@ -82,6 +88,18 @@ class S3BackendConfig:
     endpoint_url: str | None = None
 
 
+_ClientKey = tuple[str | None, str | None, str | None]
+
+
+class _LoopClientPool:
+    """Open S3 clients cached for one event loop."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.contexts: dict[_ClientKey, S3ClientContext] = {}
+        self.clients: dict[_ClientKey, S3Client] = {}
+
+
 class S3Backend(Backend):
     """S3-compatible backend with async direct-prefix listing."""
 
@@ -95,23 +113,48 @@ class S3Backend(Backend):
     ) -> None:
         self._config = config or S3BackendConfig()
         self._client_factory = client_factory or _default_client_factory
+        self._pools: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopClientPool] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._pools_guard = threading.Lock()
 
     def supports(self, location: Location) -> bool:
         return isinstance(location, S3Location)
 
+    async def list_buckets(self) -> tuple[str, ...]:
+        """Return bucket names visible to the configured default credentials."""
+
+        try:
+            async with self._client_factory(
+                profile_name=self._config.profile_name,
+                region_name=self._config.region_name,
+                endpoint_url=self._config.endpoint_url,
+            ) as client:
+                response = await client.list_buckets()
+        except BackendError:
+            raise
+        except Exception as error:
+            raise _backend_error(error) from error
+        names = [
+            name
+            for item in _sequence_of_mappings(response.get("Buckets"))
+            if (name := _optional_str(item.get("Name"))) is not None
+        ]
+        return tuple(sorted(names))
+
     async def list(self, location: Location) -> tuple[Entry, ...]:
         s3_location = self._require_s3(location)
         try:
-            async with self._client(s3_location) as client:
-                entries: list[Entry] = []
-                token: str | None = None
-                while True:
-                    page = await self._list_page(client, s3_location, token)
-                    entries.extend(_prefix_entries(s3_location, page))
-                    entries.extend(_object_entries(s3_location, page))
-                    token = _optional_str(page.get("NextContinuationToken"))
-                    if not page.get("IsTruncated") or token is None:
-                        break
+            client = await self.acquire_client(s3_location)
+            entries: list[Entry] = []
+            token: str | None = None
+            while True:
+                page = await self._list_page(client, s3_location, token)
+                entries.extend(_prefix_entries(s3_location, page))
+                entries.extend(_object_entries(s3_location, page))
+                token = _optional_str(page.get("NextContinuationToken"))
+                if not page.get("IsTruncated") or token is None:
+                    break
         except BackendError:
             raise
         except Exception as error:
@@ -126,8 +169,8 @@ class S3Backend(Backend):
             return Entry(location=s3_location, name=s3_location.bucket, entry_type=EntryType.PREFIX)
         object_key = s3_location.prefix.rstrip("/")
         try:
-            async with self._client(s3_location) as client:
-                response = await client.head_object(Bucket=s3_location.bucket, Key=object_key)
+            client = await self.acquire_client(s3_location)
+            response = await client.head_object(Bucket=s3_location.bucket, Key=object_key)
         except BackendError:
             raise
         except Exception as error:
@@ -140,13 +183,13 @@ class S3Backend(Backend):
             raise _unsupported("Cannot view an S3 bucket root", location)
         key = s3_location.prefix.rstrip("/")
         try:
-            async with self._client(s3_location) as client:
-                response = await client.get_object(
-                    Bucket=s3_location.bucket,
-                    Key=key,
-                    Range=f"bytes=0-{max_bytes}",
-                )
-                data = await _read_body(response.get("Body"))
+            client = await self.acquire_client(s3_location)
+            response = await client.get_object(
+                Bucket=s3_location.bucket,
+                Key=key,
+                Range=f"bytes=0-{max_bytes}",
+            )
+            data = await _read_body(response.get("Body"))
         except BackendError:
             raise
         except Exception as error:
@@ -160,8 +203,8 @@ class S3Backend(Backend):
             raise _unsupported("S3 bucket creation is not supported", location)
         key = _keep_marker_key(s3_location.prefix)
         try:
-            async with self._client(s3_location) as client:
-                await client.upload_fileobj(BytesIO(b""), s3_location.bucket, key)
+            client = await self.acquire_client(s3_location)
+            await client.upload_fileobj(BytesIO(b""), s3_location.bucket, key)
         except BackendError:
             raise
         except Exception as error:
@@ -178,9 +221,9 @@ class S3Backend(Backend):
             raise _unsupported("S3 file creation requires an object key", location)
         key = s3_location.prefix.rstrip("/")
         try:
-            async with self._client(s3_location) as client:
-                await client.upload_fileobj(BytesIO(b""), s3_location.bucket, key)
-                await _delete_parent_keep_marker(client, s3_location.bucket, key)
+            client = await self.acquire_client(s3_location)
+            await client.upload_fileobj(BytesIO(b""), s3_location.bucket, key)
+            await _delete_parent_keep_marker(client, s3_location.bucket, key)
         except BackendError:
             raise
         except Exception as error:
@@ -227,12 +270,59 @@ class S3Backend(Backend):
         except Exception as error:
             raise _backend_error(error, location=s3_location) from error
 
-    def _client(self, location: S3Location) -> S3ClientContext:
-        return self._client_factory(
-            profile_name=location.profile or self._config.profile_name,
-            region_name=location.region or self._config.region_name,
-            endpoint_url=location.endpoint_url or self._config.endpoint_url,
+    async def acquire_client(self, location: S3Location) -> S3Client:
+        """Return an open client for the location, reusing one per (profile, region, endpoint).
+
+        Cached clients are bound to the running event loop; the same loop must
+        later call `aclose` to release them.
+        """
+
+        key: _ClientKey = (
+            location.profile or self._config.profile_name,
+            location.region or self._config.region_name,
+            location.endpoint_url or self._config.endpoint_url,
         )
+        pool = self._loop_pool()
+        client = pool.clients.get(key)
+        if client is not None:
+            return client
+        async with pool.lock:
+            client = pool.clients.get(key)
+            if client is not None:
+                return client
+            context = self._client_factory(
+                profile_name=key[0],
+                region_name=key[1],
+                endpoint_url=key[2],
+            )
+            client = await context.__aenter__()
+            pool.contexts[key] = context
+            pool.clients[key] = client
+            return client
+
+    async def aclose(self) -> None:
+        """Close every cached client owned by the current event loop."""
+
+        loop = asyncio.get_running_loop()
+        with self._pools_guard:
+            pool = self._pools.pop(loop, None)
+        if pool is None:
+            return
+        async with pool.lock:
+            contexts = tuple(pool.contexts.values())
+            pool.contexts.clear()
+            pool.clients.clear()
+        for context in contexts:
+            await context.__aexit__(None, None, None)
+
+    def _loop_pool(self) -> _LoopClientPool:
+        loop = asyncio.get_running_loop()
+        with self._pools_guard:
+            pool = self._pools.get(loop)
+            if pool is None:
+                pool = _LoopClientPool()
+                self._pools[loop] = pool
+            return pool
 
     async def _list_page(
         self,
@@ -267,8 +357,8 @@ class S3Backend(Backend):
             current_item=location.uri,
             message=f"Deleting {location.name}",
         )
-        async with self._client(location) as client:
-            await client.delete_object(Bucket=location.bucket, Key=key)
+        client = await self.acquire_client(location)
+        await client.delete_object(Bucket=location.bucket, Key=key)
         _progress_advance(progress, items=1)
         return OperationResult.success(
             f"Deleted {location.uri}",
@@ -290,15 +380,15 @@ class S3Backend(Backend):
             current_item=location.uri,
             message=f"Deleting {location.name}",
         )
-        async with self._client(location) as client:
-            for batch in _chunks(keys, 1000):
-                _progress_raise_if_cancelled(progress)
-                _progress_update(progress, current_item=f"{len(batch)} object batch")
-                await client.delete_objects(
-                    Bucket=location.bucket,
-                    Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
-                )
-                _progress_advance(progress, items=len(batch))
+        client = await self.acquire_client(location)
+        for batch in _chunks(keys, 1000):
+            _progress_raise_if_cancelled(progress)
+            _progress_update(progress, current_item=f"{len(batch)} object batch")
+            await client.delete_objects(
+                Bucket=location.bucket,
+                Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+            )
+            _progress_advance(progress, items=len(batch))
         return OperationResult.success(
             f"Deleted {location.uri}",
             source=location,
@@ -307,23 +397,23 @@ class S3Backend(Backend):
 
     async def _list_object_keys(self, location: S3Location) -> tuple[str, ...]:
         keys: list[str] = []
-        async with self._client(location) as client:
-            token: str | None = None
-            while True:
-                request: dict[str, object] = {
-                    "Bucket": location.bucket,
-                    "Prefix": location.prefix,
-                }
-                if token is not None:
-                    request["ContinuationToken"] = token
-                page = await client.list_objects_v2(**request)
-                for item in _sequence_of_mappings(page.get("Contents")):
-                    key = _optional_str(item.get("Key"))
-                    if key is not None:
-                        keys.append(key)
-                token = _optional_str(page.get("NextContinuationToken"))
-                if not page.get("IsTruncated") or token is None:
-                    break
+        client = await self.acquire_client(location)
+        token: str | None = None
+        while True:
+            request: dict[str, object] = {
+                "Bucket": location.bucket,
+                "Prefix": location.prefix,
+            }
+            if token is not None:
+                request["ContinuationToken"] = token
+            page = await client.list_objects_v2(**request)
+            for item in _sequence_of_mappings(page.get("Contents")):
+                key = _optional_str(item.get("Key"))
+                if key is not None:
+                    keys.append(key)
+            token = _optional_str(page.get("NextContinuationToken"))
+            if not page.get("IsTruncated") or token is None:
+                break
         return tuple(keys)
 
 
@@ -508,7 +598,7 @@ def _optional_datetime(value: object) -> datetime | None:
     return None
 
 
-def _backend_error(error: Exception, *, location: S3Location) -> BackendError:
+def _backend_error(error: Exception, *, location: S3Location | None = None) -> BackendError:
     response = getattr(error, "response", None)
     if isinstance(response, Mapping):
         error_data = response.get("Error")

@@ -144,6 +144,19 @@ During development, Bucket Commander also discovers:
 config/sources.toml
 ```
 
+On the first run, when no sources file exists yet, Bucket Commander tries to
+list the S3 buckets visible to your default AWS credentials and saves them as
+known sources. If no credentials are available the step is skipped and the
+app starts with an empty source list. Only bucket names and routing metadata
+are written; credentials are never stored.
+
+To re-run discovery at any time, pass `--discover-buckets`. Newly found
+buckets are appended to the sources config; existing entries are kept as-is:
+
+```bash
+uv run bc --discover-buckets
+```
+
 Example known sources:
 
 ```toml

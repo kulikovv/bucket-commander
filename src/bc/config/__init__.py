@@ -17,8 +17,11 @@ from bc.config.sources import (
     SourcesConfig,
     SourcesConfigError,
     default_sources_config_path,
+    discovered_bucket_sources,
     load_sources_config,
     project_sources_config_path,
+    resolve_sources_config_path,
+    write_sources_config,
 )
 
 __all__ = [
@@ -37,7 +40,10 @@ __all__ = [
     "UISettings",
     "default_settings_config_path",
     "default_sources_config_path",
+    "discovered_bucket_sources",
     "load_app_settings",
     "load_sources_config",
     "project_sources_config_path",
+    "resolve_sources_config_path",
+    "write_sources_config",
 ]
