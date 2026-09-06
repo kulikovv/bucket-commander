@@ -15,6 +15,16 @@ The cache must not contain access keys, secret keys, session tokens, passwords, 
 credential files. Configuration loaders reject common credential field names before settings are
 accepted.
 
+## CI and Release Package Checks
+
+Pushes and pull requests run Ruff, mypy, and pytest on Python 3.11 and 3.12 using the locked uv
+dependencies. The MinIO integration test remains opt-in through `BC_MINIO_ENDPOINT`.
+
+Pushing a tag named `v<version>` (for example, `v0.1.0`) also runs release package checks after CI
+passes. The tag must match `project.version` in `pyproject.toml`. The workflow builds a wheel and
+source distribution, installs each in an isolated environment, and checks the CLI version and help.
+Tested packages are saved as the `release-packages` workflow artifact. Publishing remains manual.
+
 ## Damaged Index Recovery
 
 Damaged or incompatible index files should not block live bucket browsing. If a panel cache cannot be
