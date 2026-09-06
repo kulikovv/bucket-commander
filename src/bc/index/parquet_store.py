@@ -216,16 +216,15 @@ class ParquetIndexStore:
     ) -> ParquetIndexStore:
         store = cls(index_dir)
         manifest_store = store.manifest_store
-        if not manifest_store.exists():
-            manifest_store.save(
-                IndexManifest.create(
-                    provider=provider,
-                    account_id=account_id,
-                    bucket=bucket,
-                    region=region,
-                    endpoint=endpoint,
-                )
+        manifest_store.create_if_missing(
+            IndexManifest.create(
+                provider=provider,
+                account_id=account_id,
+                bucket=bucket,
+                region=region,
+                endpoint=endpoint,
             )
+        )
         return store
 
     @property
@@ -245,7 +244,6 @@ class ParquetIndexStore:
         if not rows:
             return ()
 
-        manifest = self.load_manifest()
         written_files: list[IndexFile] = []
         for partition_hash, partition_rows in _group_objects_by_partition(rows).items():
             relative_path = (
@@ -261,8 +259,8 @@ class ParquetIndexStore:
                 )
             )
 
-        self.manifest_store.save(
-            manifest.with_object_files(
+        self.manifest_store.update(
+            lambda manifest: manifest.with_object_files(
                 tuple(written_files),
                 covered_prefix=covered_prefix,
                 indexing_mode=indexing_mode,
@@ -276,9 +274,8 @@ class ParquetIndexStore:
         *,
         indexing_mode: str | None = None,
     ) -> None:
-        manifest = self.load_manifest()
-        self.manifest_store.save(
-            manifest.with_object_files(
+        self.manifest_store.update(
+            lambda manifest: manifest.with_object_files(
                 (),
                 covered_prefix=prefix,
                 indexing_mode=indexing_mode,
@@ -291,9 +288,8 @@ class ParquetIndexStore:
         *,
         indexing_mode: str | None = None,
     ) -> None:
-        manifest = self.load_manifest()
-        self.manifest_store.save(
-            manifest.with_covered_prefix(
+        self.manifest_store.update(
+            lambda manifest: manifest.with_covered_prefix(
                 prefix,
                 fully_indexed=True,
                 indexing_mode=indexing_mode,
@@ -301,8 +297,7 @@ class ParquetIndexStore:
         )
 
     def mark_checkpoint(self, checkpoint: str) -> None:
-        manifest = self.load_manifest()
-        self.manifest_store.save(manifest.with_checkpoint(checkpoint))
+        self.manifest_store.update(lambda manifest: manifest.with_checkpoint(checkpoint))
 
     def append_prefixes(
         self,
@@ -313,7 +308,6 @@ class ParquetIndexStore:
         if not rows:
             return ()
 
-        manifest = self.load_manifest()
         relative_path = Path("prefixes") / _part_name()
         path = self.index_dir / relative_path
         _write_table(path, _prefixes_to_table(rows))
@@ -322,8 +316,10 @@ class ParquetIndexStore:
             row_count=len(rows),
             created_at=datetime.now(UTC),
         )
-        self.manifest_store.save(
-            manifest.with_prefix_files((written_file,), indexing_mode=indexing_mode)
+        self.manifest_store.update(
+            lambda manifest: manifest.with_prefix_files(
+                (written_file,), indexing_mode=indexing_mode
+            )
         )
         return (self.index_dir / written_file.path,)
 
@@ -350,34 +346,37 @@ class ParquetIndexStore:
     def compact(self, *, indexing_mode: str = "compaction") -> CompactionResult:
         """Rewrite active Parquet files to newest rows and tombstone-free objects."""
 
-        manifest = self.load_manifest()
-        object_rows = _read_all_object_rows(self.index_dir, manifest.object_files)
-        prefix_rows = _read_all_prefix_rows(self.index_dir, manifest.prefix_files)
-        latest_objects = _latest_by_identity(
-            object_rows,
-            key_fields=("bucket", "key", "version_id"),
-            timestamp_fields=("refreshed_at", "discovered_at"),
-        )
-        compacted_objects = tuple(
-            _object_from_row(row) for row in latest_objects if not bool(row.get("is_delete_marker"))
-        )
-        compacted_prefixes = tuple(
-            _prefix_from_row(row)
-            for row in _latest_by_identity(
-                prefix_rows,
-                key_fields=("bucket", "prefix"),
-                timestamp_fields=("recursive_indexed_at", "listed_at"),
+        with self.manifest_store.locked():
+            manifest = self.load_manifest()
+            object_rows = _read_all_object_rows(self.index_dir, manifest.object_files)
+            prefix_rows = _read_all_prefix_rows(self.index_dir, manifest.prefix_files)
+            latest_objects = _latest_by_identity(
+                object_rows,
+                key_fields=("bucket", "key", "version_id"),
+                timestamp_fields=("refreshed_at", "discovered_at"),
             )
-        )
-        object_files = self._write_compacted_objects(compacted_objects)
-        prefix_files = self._write_compacted_prefixes(compacted_prefixes)
-        self.manifest_store.save(
-            manifest.with_active_files(
-                object_files=object_files,
-                prefix_files=prefix_files,
-                indexing_mode=indexing_mode,
+            compacted_objects = tuple(
+                _object_from_row(row)
+                for row in latest_objects
+                if not bool(row.get("is_delete_marker"))
             )
-        )
+            compacted_prefixes = tuple(
+                _prefix_from_row(row)
+                for row in _latest_by_identity(
+                    prefix_rows,
+                    key_fields=("bucket", "prefix"),
+                    timestamp_fields=("recursive_indexed_at", "listed_at"),
+                )
+            )
+            object_files = self._write_compacted_objects(compacted_objects)
+            prefix_files = self._write_compacted_prefixes(compacted_prefixes)
+            self.manifest_store.save_while_locked(
+                manifest.with_active_files(
+                    object_files=object_files,
+                    prefix_files=prefix_files,
+                    indexing_mode=indexing_mode,
+                )
+            )
         logger.info(
             "Compacted bucket index",
             extra={

@@ -1,6 +1,8 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 
 import pyarrow.parquet as pq
 
@@ -16,6 +18,7 @@ from bc.index import (
 from bc.index.cache_paths import index_dir
 
 EXPECTED_APPENDED_OBJECT_FILES = 2
+CONCURRENT_APPENDED_OBJECT_FILES = 2
 COMPACTION_OBJECT_ROWS_BEFORE = 4
 COMPACTION_PREFIX_ROWS_BEFORE = 2
 LARGE_INDEX_ROWS = 1500
@@ -115,6 +118,23 @@ def test_append_objects_writes_parquet_and_manifest_tracks_active_files(tmp_path
     ]
 
 
+def test_concurrent_appends_keep_all_manifest_file_references(tmp_path: Path) -> None:
+    store = open_store(tmp_path)
+    barrier = Barrier(2)
+
+    def append(key: str) -> None:
+        barrier.wait()
+        store.append_objects((object_row(key),))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(append, "logs/a.txt")
+        second = executor.submit(append, "logs/b.txt")
+        first.result()
+        second.result()
+
+    assert len(store.load_manifest().object_files) == CONCURRENT_APPENDED_OBJECT_FILES
+
+
 def test_append_prefixes_and_read_current_prefix_as_entries(tmp_path: Path) -> None:
     store = open_store(tmp_path)
 
@@ -125,7 +145,7 @@ def test_append_prefixes_and_read_current_prefix_as_entries(tmp_path: Path) -> N
 
     assert [entry.name for entry in listing.entries] == ["archive", "a.txt"]
     assert [entry.entry_type for entry in listing.entries] == [EntryType.PREFIX, EntryType.OBJECT]
-    assert listing.entries[1].location.uri == "s3://example-bucket/logs/a.txt/"
+    assert listing.entries[1].location.uri == "s3://example-bucket/logs/a.txt"
 
 
 def test_current_prefix_query_returns_newest_rows_without_mutating_old_files(

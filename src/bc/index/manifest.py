@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, TextIO
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 
 INDEX_SCHEMA_VERSION = 1
+_LOCKS_GUARD = threading.Lock()
+_MANIFEST_LOCKS: dict[Path, threading.RLock] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,12 +295,73 @@ class ManifestStore:
         return IndexManifest.from_json(data)
 
     def save(self, manifest: IndexManifest) -> None:
+        with self.locked():
+            self._save_unlocked(manifest)
+
+    def create_if_missing(self, manifest: IndexManifest) -> IndexManifest:
+        """Persist `manifest` only when this store has not been initialized."""
+
+        with self.locked():
+            if self.exists():
+                return self.load()
+            self._save_unlocked(manifest)
+            return manifest
+
+    def update(self, transform: Callable[[IndexManifest], IndexManifest]) -> IndexManifest:
+        """Atomically load, transform, and replace the manifest in this process."""
+
+        with self.locked():
+            updated = transform(self.load())
+            self._save_unlocked(updated)
+            return updated
+
+    def save_while_locked(self, manifest: IndexManifest) -> None:
+        """Replace the manifest while the caller owns :meth:`locked`."""
+
+        self._save_unlocked(manifest)
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """Serialize manifest changes across threads and POSIX processes."""
+
+        lock = _manifest_lock(self.index_dir)
+        with lock:
+            self.index_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = self.index_dir / ".manifest.lock"
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                _lock_file(lock_file)
+                try:
+                    yield
+                finally:
+                    _unlock_file(lock_file)
+
+    def _save_unlocked(self, manifest: IndexManifest) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         temporary_path = self.path.with_suffix(".json.tmp")
         with temporary_path.open("w", encoding="utf-8") as manifest_file:
             json.dump(manifest.to_json(), manifest_file, indent=2, sort_keys=True)
             manifest_file.write("\n")
         temporary_path.replace(self.path)
+
+
+def _manifest_lock(index_dir: Path) -> threading.RLock:
+    resolved = index_dir.resolve()
+    with _LOCKS_GUARD:
+        lock = _MANIFEST_LOCKS.get(resolved)
+        if lock is None:
+            lock = threading.RLock()
+            _MANIFEST_LOCKS[resolved] = lock
+        return lock
+
+
+def _lock_file(lock_file: TextIO) -> None:
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(lock_file: TextIO) -> None:
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _append_optional(values: tuple[str, ...], value: str | None) -> tuple[str, ...]:

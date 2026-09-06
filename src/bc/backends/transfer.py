@@ -68,7 +68,7 @@ class TransferBackend(Backend):
         if isinstance(source, LocalLocation):
             delete_result = await LocalBackend().delete(source, recursive=True)
         elif isinstance(source, S3Location):
-            delete_result = await self._s3.delete(source, recursive=True)
+            delete_result = await self._s3.delete(source, recursive=source.prefix.endswith("/"))
         else:
             raise _unsupported(
                 "Transfer backend only supports local/S3 transfers",
@@ -159,10 +159,14 @@ class TransferBackend(Backend):
             message=f"Downloading {source.name}",
         )
         target_root = await asyncio.to_thread(_resolve_local_destination, source, destination.path)
+        resolved_target_root = target_root.resolve()
         client = await self._s3.acquire_client(source)
         for key, size in objects:
             _progress_raise_if_cancelled(progress)
-            target = target_root / _relative_s3_download_path(source, key)
+            target = target_root / _safe_download_relative_path(source, key)
+            if not target.resolve().is_relative_to(resolved_target_root):
+                msg = f"S3 key resolves outside the destination directory: {key!r}"
+                raise BackendError(BackendErrorKind.INVALID_LOCATION, msg, location=source)
             _progress_update(progress, current_item=f"s3://{source.bucket}/{key} -> {target}")
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             await _download_file(client, source.bucket, key, target)
@@ -231,12 +235,11 @@ class TransferBackend(Backend):
 
     async def _s3_objects(self, source: S3Location) -> tuple[tuple[str, int], ...]:
         prefix = source.prefix
-        objects: list[tuple[str, int]] = []
         client = await self._s3.acquire_client(source)
-        objects.extend(await _list_s3_objects(client, source.bucket, prefix))
-        if not objects and prefix.endswith("/"):
-            objects.extend(await _list_s3_objects(client, source.bucket, prefix.rstrip("/")))
-        return tuple(objects)
+        objects = await _list_s3_objects(client, source.bucket, prefix)
+        if prefix.endswith("/"):
+            return objects
+        return tuple(item for item in objects if item[0] == prefix)
 
 
 async def _upload_file(client: S3Client, path: Path, bucket: str, key: str) -> None:
@@ -290,13 +293,20 @@ def _resolve_local_destination(source: S3Location, destination: Path) -> Path:
     return destination
 
 
-def _relative_s3_download_path(source: S3Location, key: str) -> Path:
+def _safe_download_relative_path(source: S3Location, key: str) -> Path:
     if key == source.prefix.rstrip("/"):
         return Path()
     if source.prefix.endswith("/"):
         relative = key.removeprefix(source.prefix).lstrip("/")
-        return Path(relative) if relative else Path(key.rsplit("/", maxsplit=1)[-1])
-    return Path(key.rsplit("/", maxsplit=1)[-1])
+    else:
+        relative = key.rsplit("/", maxsplit=1)[-1]
+    if not relative:
+        relative = key.rsplit("/", maxsplit=1)[-1]
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} or "\\" in part for part in parts):
+        msg = f"S3 key contains an unsafe local path: {key!r}"
+        raise BackendError(BackendErrorKind.INVALID_LOCATION, msg, location=source)
+    return Path(*parts)
 
 
 def _relative_s3_copy_key(source: S3Location, key: str) -> str:

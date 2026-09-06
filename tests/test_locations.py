@@ -40,8 +40,16 @@ def test_s3_bucket_root_round_trips() -> None:
     assert parse_location(location.uri) == location
 
 
-def test_s3_prefix_is_normalized_and_round_trips() -> None:
-    location = parse_location("s3://example-bucket/path/to/prefix")
+def test_s3_object_path_is_preserved_and_round_trips() -> None:
+    location = parse_location("s3://example-bucket/path/to/object")
+
+    assert location == S3Location(bucket="example-bucket", prefix="path/to/object")
+    assert location.uri == "s3://example-bucket/path/to/object"
+    assert parse_location(location.uri) == location
+
+
+def test_s3_prefix_path_is_preserved_and_round_trips() -> None:
+    location = parse_location("s3://example-bucket/path/to/prefix/")
 
     assert location == S3Location(bucket="example-bucket", prefix="path/to/prefix/")
     assert location.uri == "s3://example-bucket/path/to/prefix/"

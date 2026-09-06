@@ -114,7 +114,7 @@ class LocalBackend(Backend):
         entry_type = _entry_type(path)
         size = stat_result.st_size if entry_type in {EntryType.FILE, EntryType.SYMLINK} else None
         return Entry(
-            location=LocalLocation(path.resolve()),
+            location=LocalLocation(path),
             name=path.name or path.anchor,
             entry_type=entry_type,
             size=size,
@@ -159,6 +159,27 @@ class LocalBackend(Backend):
         if not source.path.exists():
             raise _backend_error(FileNotFoundError(errno.ENOENT, "No such file", source.path))
         target = _resolve_target(source.path, destination.path)
+        if _same_file(source.path, target):
+            msg = f"Source and destination are the same file: {source.path}"
+            raise BackendError(
+                BackendErrorKind.ALREADY_EXISTS,
+                msg,
+                location=source,
+                destination=destination,
+            )
+        is_copying_directory_into_self = (
+            source.path.is_dir()
+            and not source.path.is_symlink()
+            and _is_within(target, source.path)
+        )
+        if is_copying_directory_into_self:
+            msg = f"Cannot copy a directory into itself: {source.path} -> {target}"
+            raise BackendError(
+                BackendErrorKind.INVALID_LOCATION,
+                msg,
+                location=source,
+                destination=destination,
+            )
         entries, bytes_total = _tree_totals(source.path)
         _progress_update(
             progress,
@@ -261,7 +282,7 @@ class LocalBackend(Backend):
     ) -> None:
         _progress_update(progress, current_item=str(source))
         if source.is_symlink():
-            shutil.copy2(source, target)
+            shutil.copy2(source, target, follow_symlinks=False)
             _progress_advance(progress, items=1, bytes_count=source.lstat().st_size)
             return
         with source.open("rb") as source_file, target.open("wb") as target_file:
@@ -355,6 +376,21 @@ def _resolve_target(source: Path, destination: Path) -> Path:
     if destination.exists() and destination.is_dir():
         return destination / source.name
     return destination
+
+
+def _same_file(source: Path, target: Path) -> bool:
+    try:
+        return source.samefile(target)
+    except FileNotFoundError:
+        return False
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _backend_error(error: OSError) -> BackendError:

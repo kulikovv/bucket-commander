@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from bc.backends import Backend, BackendError, BackendErrorKind
 from bc.core import Location, OperationResult
@@ -74,6 +74,7 @@ class BatchJobWorker:
         """Run one durable job by id."""
 
         record = self._require_job(job_id)
+        self._recover_interrupted_items(record)
         running = transition_job_status(record, JobStatus.RUNNING, phase=_phase_for(record.plan))
         self._store.update_job_status(running)
         try:
@@ -97,6 +98,17 @@ class BatchJobWorker:
                 current,
                 JobStatus.FAILED,
                 latest_error="One or more job items failed",
+            )
+            self._store.update_job_status(failed)
+            return self._result(failed)
+        incomplete_items = any(
+            item.status not in {JobItemStatus.COMPLETED, JobItemStatus.SKIPPED} for item in items
+        )
+        if incomplete_items:
+            failed = transition_job_status(
+                current,
+                JobStatus.FAILED,
+                latest_error="One or more job items did not reach a terminal state",
             )
             self._store.update_job_status(failed)
             return self._result(failed)
@@ -200,6 +212,19 @@ class BatchJobWorker:
             msg = f"Unknown durable job: {job_id}"
             raise KeyError(msg)
         return record
+
+    def _recover_interrupted_items(self, record: JobRecord) -> None:
+        if record.status is not JobStatus.RUNNING:
+            return
+        for item in self._store.list_items(record.job_id):
+            if item.status is JobItemStatus.RUNNING:
+                self._store.update_item(
+                    replace(
+                        item,
+                        status=JobItemStatus.PENDING,
+                        latest_error="Recovered after interruption",
+                    )
+                )
 
     def _result(self, record: JobRecord) -> JobExecutionResult:
         items = self._store.list_items(record.job_id)

@@ -384,7 +384,7 @@ def test_recursive_delete_object_falls_back_to_exact_key() -> None:
     assert client.list_requests == [
         {
             "Bucket": "example-bucket",
-            "Prefix": "logs/a.txt/",
+            "Prefix": "logs/a.txt",
         }
     ]
     assert client.delete_requests == [{"Bucket": "example-bucket", "Key": "logs/a.txt"}]
@@ -416,6 +416,33 @@ def test_delete_prefix_batches_s3_objects() -> None:
             },
         }
     ]
+
+
+def test_delete_prefix_raises_when_s3_reports_partial_failure() -> None:
+    class PartiallyFailingS3Client(FakeS3Client):
+        async def delete_objects(self, **kwargs: object) -> Mapping[str, object]:
+            self.delete_requests.append(dict(kwargs))
+            return {
+                "Errors": [
+                    {
+                        "Key": "logs/a.txt",
+                        "Code": "AccessDenied",
+                        "Message": "Access denied",
+                    }
+                ]
+            }
+
+    client = PartiallyFailingS3Client(
+        ({"Contents": [{"Key": "logs/a.txt"}], "IsTruncated": False},)
+    )
+    backend = S3Backend(client_factory=RecordingClientFactory(client))
+
+    with pytest.raises(BackendError) as error_info:
+        run_async(
+            backend.delete(S3Location(bucket="example-bucket", prefix="logs/"), recursive=True)
+        )
+
+    assert error_info.value.kind is BackendErrorKind.PERMISSION_DENIED
 
 
 def test_s3_copy_operations_are_not_implemented_yet() -> None:
