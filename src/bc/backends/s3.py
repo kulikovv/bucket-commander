@@ -384,10 +384,11 @@ class S3Backend(Backend):
         for batch in _chunks(keys, 1000):
             _progress_raise_if_cancelled(progress)
             _progress_update(progress, current_item=f"{len(batch)} object batch")
-            await client.delete_objects(
+            response = await client.delete_objects(
                 Bucket=location.bucket,
                 Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
             )
+            _raise_for_delete_errors(response, location)
             _progress_advance(progress, items=len(batch))
         return OperationResult.success(
             f"Deleted {location.uri}",
@@ -566,6 +567,18 @@ def _keep_marker_key(prefix: str) -> str:
 
 def _is_keep_marker_key(key: str) -> bool:
     return key.rsplit("/", maxsplit=1)[-1] == KEEP_MARKER_NAME
+
+
+def _raise_for_delete_errors(response: Mapping[str, object], location: S3Location) -> None:
+    errors = _sequence_of_mappings(response.get("Errors"))
+    if not errors:
+        return
+    first_error = errors[0]
+    code = _optional_str(first_error.get("Code"))
+    key = _optional_str(first_error.get("Key"))
+    detail = _optional_str(first_error.get("Message")) or "S3 refused to delete an object"
+    suffix = f" for {key}" if key else ""
+    raise BackendError(_error_kind(code), f"{detail}{suffix}", location=location)
 
 
 async def _delete_parent_keep_marker(client: S3Client, bucket: str, key: str) -> None:

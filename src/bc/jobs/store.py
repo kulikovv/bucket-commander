@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeAlias
+from typing import SupportsInt, TypeAlias
 from uuid import uuid4
 
 from bc.core import EntryType, LocalLocation, Location, S3Location
@@ -362,7 +362,10 @@ def _optional_str(value: object) -> str | None:
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
-    return int(value)
+    if isinstance(value, str | bytes | bytearray | SupportsInt):
+        return int(value)
+    msg = f"Expected integer-compatible value, got {type(value).__name__}"
+    raise ValueError(msg)
 
 
 def _format_required_datetime(value: datetime | None) -> str:

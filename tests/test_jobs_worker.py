@@ -15,6 +15,7 @@ from bc.jobs import (
     plan_delete,
     plan_move,
 )
+from bc.jobs.models import transition_item_status, transition_job_status
 
 RETRY_ATTEMPTS = 2
 
@@ -140,6 +141,30 @@ def test_worker_records_permanent_item_failure(tmp_path: Path) -> None:
     assert item.status is JobItemStatus.FAILED
     assert item.attempts == RETRY_ATTEMPTS
     assert "copy failed" in item.latest_error
+
+
+def test_worker_recovers_interrupted_running_item_before_completing(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination"
+    source.write_text("recover", encoding="utf-8")
+    destination.mkdir()
+    store = SQLiteJobStore(tmp_path / "jobs.sqlite3")
+    record = store.add_plan(
+        plan_copy(
+            (_entry(source),),
+            source_panel="left",
+            destination=parse_location(destination),
+        )
+    )
+    store.update_job_status(transition_job_status(record, JobStatus.RUNNING))
+    item = store.list_items(record.job_id)[0]
+    store.update_item(transition_item_status(item, JobItemStatus.RUNNING))
+
+    result = asyncio.run(BatchJobWorker(store=store, backend=LocalBackend()).run_job(record.job_id))
+
+    assert result.status is JobStatus.COMPLETED
+    assert store.list_items(record.job_id)[0].status is JobItemStatus.COMPLETED
+    assert (destination / source.name).read_text(encoding="utf-8") == "recover"
 
 
 def _entry(path: Path) -> Entry:

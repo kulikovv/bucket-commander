@@ -76,7 +76,7 @@ class S3Location:
         if self.prefix.startswith("/"):
             msg = f"S3 prefix must not start with '/': {self.prefix!r}"
             raise LocationError(msg)
-        normalized = _normalize_s3_prefix(self.prefix)
+        normalized = _normalize_s3_path(self.prefix)
         object.__setattr__(self, "prefix", normalized)
 
     @property
@@ -117,7 +117,7 @@ class S3Location:
             raise LocationError(msg)
         return S3Location(
             bucket=self.bucket,
-            prefix=f"{self.prefix}{name}/",
+            prefix=f"{self.prefix.rstrip('/')}/{name}/",
             profile=self.profile,
             region=self.region,
             endpoint_url=self.endpoint_url,
@@ -174,8 +174,8 @@ def _parse_s3_uri(bucket: str, path: str) -> S3Location:
     return S3Location(bucket=bucket, prefix=prefix)
 
 
-def _normalize_s3_prefix(prefix: str) -> str:
-    normalized = prefix.strip("/")
+def _normalize_s3_path(prefix: str) -> str:
+    normalized = prefix.lstrip("/")
     if not normalized:
         return ""
-    return f"{normalized}/"
+    return normalized

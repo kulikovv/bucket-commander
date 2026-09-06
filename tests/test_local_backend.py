@@ -95,6 +95,17 @@ def test_copy_file_to_existing_directory(tmp_path: Path) -> None:
     assert (destination / "source.txt").read_text(encoding="utf-8") == payload
 
 
+def test_copy_file_to_its_own_directory_preserves_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("important payload", encoding="utf-8")
+
+    with pytest.raises(BackendError) as error_info:
+        run(LocalBackend().copy(local(source), local(tmp_path)))
+
+    assert error_info.value.kind is BackendErrorKind.ALREADY_EXISTS
+    assert source.read_text(encoding="utf-8") == "important payload"
+
+
 def test_copy_directory_merges_into_target(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "copy"
@@ -147,6 +158,21 @@ def test_delete_file_and_directory(tmp_path: Path) -> None:
     assert directory_result.ok
     assert not file_path.exists()
     assert not directory_path.exists()
+
+
+def test_delete_listed_symlink_does_not_delete_its_target(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    link = tmp_path / "link.txt"
+    target.write_text("target", encoding="utf-8")
+    link.symlink_to(target)
+    entry = next(
+        entry for entry in run(LocalBackend().list(local(tmp_path))) if entry.name == link.name
+    )
+
+    run(LocalBackend().delete(entry.location))
+
+    assert target.exists()
+    assert not link.exists()
 
 
 def test_delete_directory_requires_recursive_flag(tmp_path: Path) -> None:

@@ -3,7 +3,16 @@ from collections.abc import Coroutine, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar
 
-from bc.backends import BackendRouter, LocalBackend, S3Backend, TransferBackend
+import pytest
+
+from bc.backends import (
+    BackendError,
+    BackendErrorKind,
+    BackendRouter,
+    LocalBackend,
+    S3Backend,
+    TransferBackend,
+)
 from bc.core import S3Location, parse_location
 
 T = TypeVar("T")
@@ -223,6 +232,41 @@ def test_router_moves_s3_object_to_s3_prefix() -> None:
 
     assert "bucket-commander/logs/a.txt" not in client.objects
     assert client.objects["archive-bucket/backup/a.txt"] == b"alpha"
+
+
+def test_router_move_s3_object_does_not_delete_matching_prefix_contents() -> None:
+    client = FakeTransferS3Client()
+    client.objects["bucket-commander/report"] = b"report"
+    client.objects["bucket-commander/report/child.txt"] = b"child"
+    router = _router(client)
+
+    run_async(
+        router.move(
+            S3Location(bucket="bucket-commander", prefix="report"),
+            S3Location(bucket="archive-bucket", prefix="backup/"),
+        )
+    )
+
+    assert client.objects["archive-bucket/backup/report"] == b"report"
+    assert client.objects["bucket-commander/report/child.txt"] == b"child"
+
+
+def test_router_rejects_s3_keys_that_escape_download_directory(tmp_path: Path) -> None:
+    client = FakeTransferS3Client()
+    client.objects["bucket-commander/logs/../../outside.txt"] = b"outside"
+    destination = tmp_path / "downloads"
+    destination.mkdir()
+
+    with pytest.raises(BackendError) as error_info:
+        run_async(
+            _router(client).copy(
+                S3Location(bucket="bucket-commander", prefix="logs/"),
+                parse_location(destination),
+            )
+        )
+
+    assert error_info.value.kind is BackendErrorKind.INVALID_LOCATION
+    assert not (tmp_path / "outside.txt").exists()
 
 
 def _router(client: FakeTransferS3Client) -> BackendRouter:
