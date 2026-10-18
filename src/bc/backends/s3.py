@@ -193,6 +193,14 @@ class S3Backend(Backend):
         except BackendError:
             raise
         except Exception as error:
+            response_data = getattr(error, "response", None)
+            error_data = response_data.get("Error") if isinstance(response_data, Mapping) else None
+            if (
+                isinstance(error_data, Mapping)
+                and error_data.get("Code") == "InvalidRange"
+                and (await self.stat(s3_location)).size == 0
+            ):
+                return PreviewResult(data=b"", truncated=False)
             raise _backend_error(error, location=s3_location) from error
         return PreviewResult(data=data[:max_bytes], truncated=len(data) > max_bytes)
 
