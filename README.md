@@ -207,7 +207,7 @@ AWS_ACCESS_KEY_ID=bucketcommander \
 AWS_SECRET_ACCESS_KEY=bucketcommander123 \
 AWS_EC2_METADATA_DISABLED=true \
 BC_MINIO_ENDPOINT=http://127.0.0.1:9000 \
-uv --cache-dir .uv-cache run pytest tests/test_s3_minio_integration.py
+uv --cache-dir .uv-cache run pytest -m integration
 ```
 
 Open Bucket Commander against the seeded bucket:

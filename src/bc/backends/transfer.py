@@ -126,7 +126,13 @@ class TransferBackend(Backend):
         return OperationResult.success(
             f"Copied {source.uri} to {destination.uri}",
             source=source,
-            destination=destination,
+            destination=S3Location(
+                bucket=destination.bucket,
+                prefix=_join_s3_key(destination.prefix, source.name),
+                profile=destination.profile,
+                region=destination.region,
+                endpoint_url=destination.endpoint_url,
+            ),
             entries_affected=len(files),
             bytes_affected=bytes_total,
         )
@@ -313,7 +319,7 @@ def _relative_s3_copy_key(source: S3Location, key: str) -> str:
     if key == source.prefix.rstrip("/"):
         return key.rsplit("/", maxsplit=1)[-1]
     if source.prefix.endswith("/"):
-        return key.removeprefix(source.prefix).lstrip("/")
+        return _join_s3_key(source.name, key.removeprefix(source.prefix))
     return key.rsplit("/", maxsplit=1)[-1]
 
 
