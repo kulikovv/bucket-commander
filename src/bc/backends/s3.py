@@ -8,7 +8,7 @@ import inspect
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import BinaryIO, Protocol, SupportsInt, cast
@@ -256,8 +256,108 @@ class S3Backend(Backend):
         raise _unsupported("S3 move is not implemented yet", source, destination=destination)
 
     async def rename(self, source: Location, new_name: str) -> OperationResult:
-        _ = new_name
-        raise _unsupported("S3 rename is not implemented yet", source)
+        """Rename a sibling object or prefix, refusing existing destinations.
+
+        S3 has no atomic rename. Copy and verify all selected objects before deleting
+        the original keys; interrupted copies may leave a partial destination.
+        """
+        location = self._require_s3(source)
+        if (
+            not location.prefix
+            or not new_name
+            or new_name in {".", ".."}
+            or any(char in new_name for char in "/\\\x00")
+        ):
+            raise BackendError(
+                BackendErrorKind.INVALID_LOCATION,
+                "Rename requires a valid sibling name",
+                location=location,
+            )
+        parent = location.parent()
+        assert parent is not None
+        destination = replace(
+            location,
+            prefix=f"{parent.prefix}{new_name}" + ("/" if location.prefix.endswith("/") else ""),
+        )
+        if destination == location:
+            raise BackendError(
+                BackendErrorKind.ALREADY_EXISTS,
+                "Source and destination are the same",
+                location=location,
+                destination=destination,
+            )
+        try:
+            return await self._rename_s3(location, destination)
+        except BackendError:
+            raise
+        except Exception as error:
+            raise _backend_error(error, location=location) from error
+
+    async def _rename_s3(self, source: S3Location, destination: S3Location) -> OperationResult:
+        client = await self.acquire_client(source)
+        keys = (
+            await self._list_object_keys(source)
+            if source.prefix.endswith("/")
+            else (source.prefix,)
+        )
+        if not keys:
+            raise BackendError(
+                BackendErrorKind.NOT_FOUND, "Source prefix is empty", location=source
+            )
+        existing = await self._list_object_keys(
+            replace(destination, prefix=destination.prefix.rstrip("/"))
+        )
+        target_root = destination.prefix.rstrip("/")
+        if any(key == target_root or key.startswith(f"{target_root}/") for key in existing):
+            raise BackendError(
+                BackendErrorKind.ALREADY_EXISTS,
+                "Rename destination already exists",
+                location=source,
+                destination=destination,
+            )
+        snapshots = []
+        for key in keys:
+            head = await client.head_object(Bucket=source.bucket, Key=key)
+            target = destination.prefix + key.removeprefix(source.prefix)
+            snapshots.append((key, target, head))
+        for key, target, head in snapshots:
+            request: dict[str, object] = {
+                "Bucket": source.bucket,
+                "Key": target,
+                "CopySource": {"Bucket": source.bucket, "Key": key},
+            }
+            if head.get("ETag") is not None:
+                request["CopySourceIfMatch"] = head["ETag"]
+            await client.copy_object(**request)
+        for key, target, head in snapshots:
+            copied = await client.head_object(Bucket=source.bucket, Key=target)
+            current = await client.head_object(Bucket=source.bucket, Key=key)
+            if (
+                copied.get("ContentLength") != head.get("ContentLength")
+                or current.get("ContentLength") != head.get("ContentLength")
+                or current.get("ETag") != head.get("ETag")
+            ):
+                raise BackendError(
+                    BackendErrorKind.IO_ERROR,
+                    "Rename verification failed; sources retained",
+                    location=source,
+                    destination=destination,
+                )
+        for batch in _chunks(keys, 1000):
+            response = await client.delete_objects(
+                Bucket=source.bucket,
+                Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+            )
+            _raise_for_delete_errors(response, source)
+        return OperationResult.success(
+            f"Renamed {source.uri} to {destination.uri}",
+            source=source,
+            destination=destination,
+            entries_affected=len(keys),
+            bytes_affected=sum(
+                _optional_int(head.get("ContentLength")) or 0 for _, _, head in snapshots
+            ),
+        )
 
     async def delete(
         self,

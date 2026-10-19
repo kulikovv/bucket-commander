@@ -418,17 +418,10 @@ def test_create_list_preview_rename_and_delete(
             assert [entry.name for entry in await router.list(folder)] == ["empty.txt"]
             assert (await router.stat(file)).size == 0
             assert (await router.preview(file, max_bytes=10)).data == b""
-            if storage == "minio":
-                with pytest.raises(BackendError) as error:
-                    await router.rename(file, "renamed.txt")
-                assert error.value.kind is BackendErrorKind.UNSUPPORTED
-                assert (await router.stat(file)).size == 0
-                await router.delete(file)
-            else:
-                renamed = await router.rename(file, "renamed.txt")
-                assert renamed.destination is not None
-                assert [entry.name for entry in await router.list(folder)] == ["renamed.txt"]
-                await router.delete(renamed.destination)
+            renamed = await router.rename(file, "renamed.txt")
+            assert renamed.destination is not None
+            assert [entry.name for entry in await router.list(folder)] == ["renamed.txt"]
+            await router.delete(renamed.destination)
             assert await router.list(folder) == ()
             await router.delete(folder, recursive=True)
         finally:
@@ -478,3 +471,159 @@ def test_failed_or_cancelled_move_retains_source(
         run_async(_router(client).move(source, target))
     assert path.read_bytes() == b"original"
     assert client.objects == {"bucket-commander/source/nested/file.txt": b"original"}
+
+
+@pytest.mark.parametrize("storage", ["fake", pytest.param("minio", marks=pytest.mark.integration)])
+@pytest.mark.parametrize("prefix", [False, True])
+def test_s3_rename_preserves_tree_and_neighbors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, storage: str, prefix: bool
+) -> None:
+    s3, router = _operation_backends(storage, monkeypatch)
+    root = S3Location(bucket="bucket-commander", prefix=f"rename-tests/{uuid4().hex}/")
+    source = S3Location(bucket=root.bucket, prefix=f"{root.prefix}old" + ("/" if prefix else ""))
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"original")
+
+    async def exercise() -> None:
+        try:
+            client = await s3.acquire_client(root)
+            keys = (
+                [f"{source.prefix}nested/file.txt", f"{source.prefix}.keep"]
+                if prefix
+                else [source.prefix]
+            )
+            for key in [*keys, f"{root.prefix}oldish/neighbor.txt"]:
+                with payload.open("rb") as handle:
+                    await client.upload_fileobj(handle, root.bucket, key)
+            result = await router.rename(source, "renamed ü")
+            assert result.destination == S3Location(
+                bucket=root.bucket, prefix=f"{root.prefix}renamed ü" + ("/" if prefix else "")
+            )
+            page = await client.list_objects_v2(Bucket=root.bucket, Prefix=root.prefix)
+            objects = page.get("Contents", [])
+            assert isinstance(objects, list)
+            assert {item["Key"] for item in objects} == {
+                *(f"{result.destination.prefix}{key.removeprefix(source.prefix)}" for key in keys),
+                f"{root.prefix}oldish/neighbor.txt",
+            }
+            for key in keys:
+                target = f"{result.destination.prefix}{key.removeprefix(source.prefix)}"
+                downloaded = tmp_path / "downloaded"
+                with downloaded.open("wb") as handle:
+                    await client.download_fileobj(root.bucket, target, handle)
+                assert downloaded.read_bytes() == b"original"
+        finally:
+            await s3.delete(root, recursive=True)
+            await s3.aclose()
+
+    run_async(exercise())
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b", "a\x00b", "old"])
+def test_s3_rename_rejects_invalid_or_identical_names(name: str) -> None:
+    client = FakeTransferS3Client()
+    original = {"bucket-commander/old/file.txt": b"original"}
+    client.objects.update(original)
+    with pytest.raises(BackendError):
+        run_async(
+            _router(client).rename(S3Location(bucket="bucket-commander", prefix="old/"), name)
+        )
+    assert client.objects == original
+
+
+@pytest.mark.parametrize("destination", ["new", "new/file.txt"])
+def test_s3_rename_rejects_existing_destination(destination: str) -> None:
+    client = FakeTransferS3Client()
+    original = {
+        "bucket-commander/old/file.txt": b"original",
+        f"bucket-commander/{destination}": b"existing",
+    }
+    client.objects.update(original)
+    with pytest.raises(BackendError) as error:
+        run_async(
+            _router(client).rename(S3Location(bucket="bucket-commander", prefix="old/"), "new")
+        )
+    assert error.value.kind is BackendErrorKind.ALREADY_EXISTS
+    assert client.objects == original
+
+
+@pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
+def test_s3_rename_copy_failure_retains_all_sources(failure: type[BaseException]) -> None:
+    class FailingClient(FakeTransferS3Client):
+        async def copy_object(self, **kwargs: object) -> Mapping[str, object]:
+            if kwargs["Key"] == "new/b.txt":
+                raise failure("copy interrupted")
+            return await super().copy_object(**kwargs)
+
+    client = FailingClient()
+    client.objects.update({"bucket-commander/old/a.txt": b"a", "bucket-commander/old/b.txt": b"b"})
+    with pytest.raises(BackendError if failure is OSError else failure):
+        run_async(
+            _router(client).rename(S3Location(bucket="bucket-commander", prefix="old/"), "new")
+        )
+    assert client.objects["bucket-commander/old/a.txt"] == b"a"
+    assert client.objects["bucket-commander/old/b.txt"] == b"b"
+
+
+def test_s3_rename_verification_failure_keeps_sources() -> None:
+    class CorruptingClient(FakeTransferS3Client):
+        async def copy_object(self, **kwargs: object) -> Mapping[str, object]:
+            result = await super().copy_object(**kwargs)
+            self.objects[f"{kwargs['Bucket']}/{kwargs['Key']}"] = b"corrupt"
+            return result
+
+    client = CorruptingClient()
+    client.objects["bucket-commander/old/file.txt"] = b"original"
+    with pytest.raises(BackendError) as error:
+        run_async(
+            _router(client).rename(S3Location(bucket="bucket-commander", prefix="old/"), "new")
+        )
+    assert error.value.kind is BackendErrorKind.IO_ERROR
+    assert client.objects["bucket-commander/old/file.txt"] == b"original"
+
+
+def test_s3_rename_paginated_prefix_and_batched_deletion() -> None:
+    page_size = 1000
+
+    class PaginatedClient(FakeTransferS3Client):
+        async def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
+            result = dict(await super().list_objects_v2(**kwargs))
+            contents = result["Contents"]
+            assert isinstance(contents, list)
+            start = int(str(kwargs.get("ContinuationToken", "0")))
+            result["Contents"] = contents[start : start + 1000]
+            result["IsTruncated"] = start + 1000 < len(contents)
+            if result["IsTruncated"]:
+                result["NextContinuationToken"] = str(start + 1000)
+            return result
+
+        async def delete_objects(self, **kwargs: object) -> Mapping[str, object]:
+            delete = kwargs["Delete"]
+            assert isinstance(delete, dict)
+            assert len(delete["Objects"]) <= page_size
+            return await super().delete_objects(**kwargs)
+
+    client = PaginatedClient()
+    count = 1003
+    for index in range(count):
+        client.objects[f"bucket-commander/old/{index}.txt"] = str(index).encode()
+    result = run_async(
+        _router(client).rename(S3Location(bucket="bucket-commander", prefix="old/"), "new")
+    )
+    assert result.entries_affected == count
+    assert client.objects == {
+        f"bucket-commander/new/{index}.txt": str(index).encode() for index in range(count)
+    }
+
+
+@pytest.mark.parametrize("prefix", ["", "missing/"])
+def test_s3_rename_rejects_bucket_root_and_missing_prefix(prefix: str) -> None:
+    client = FakeTransferS3Client()
+    with pytest.raises(BackendError) as error:
+        run_async(
+            _router(client).rename(S3Location(bucket="bucket-commander", prefix=prefix), "new")
+        )
+    assert error.value.kind is (
+        BackendErrorKind.INVALID_LOCATION if not prefix else BackendErrorKind.NOT_FOUND
+    )
+    assert client.objects == {}
