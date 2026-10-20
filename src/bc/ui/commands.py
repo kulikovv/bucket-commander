@@ -138,7 +138,13 @@ async def go_parent(state: TwoPanelState, backend: Backend) -> TwoPanelState:
     if parent is None:
         return state.with_status("Already at filesystem root")
     next_state = state.with_panel(state.focused, PanelState(location=parent))
-    return await refresh(next_state, state.focused, backend)
+    refreshed = await refresh(next_state, state.focused, backend)
+    parent_panel = refreshed.active
+    cursor = next(
+        (index for index, entry in enumerate(parent_panel.entries) if entry.uri == location.uri),
+        0,
+    )
+    return refreshed.with_panel(state.focused, replace(parent_panel, cursor_index=cursor))
 
 
 def with_parent_entry(location: object, entries: tuple[Entry, ...]) -> tuple[Entry, ...]:
