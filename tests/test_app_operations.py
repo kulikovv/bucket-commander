@@ -824,3 +824,64 @@ def test_backslash_leaves_indexed_search_mode(tmp_path: Path) -> None:
         assert backend.list_calls == [location]
     finally:
         app._tasks.close()
+
+
+def test_text_prompts_accept_q_and_escape_only_closes_prompt(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    try:
+        app._show_create_prompt("file")
+        for key in "query.txt":
+            app._handle_key(key)
+        assert app._create_prompt == ("file", "query.txt")
+        app._handle_key("esc")
+        assert app._create_prompt is None
+        app._show_search_dialog()
+        for key in "query":
+            app._handle_key(key)
+        assert app._search_text == "query"
+        app._handle_key("esc")
+        assert app._search_panel is None
+    finally:
+        app._tasks.close()
+
+
+def test_select_all_excludes_parent_and_escape_clears_selection(tmp_path: Path) -> None:
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    parent = Entry(
+        location=parse_location(tmp_path.parent), name="..", entry_type=EntryType.DIRECTORY
+    )
+    file = Entry(location=parse_location(tmp_path / "file"), name="file", entry_type=EntryType.FILE)
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=parse_location(tmp_path), entries=(parent, file)),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+        app._handle_key("ctrl a")
+        assert app._state.left.selected_entries == (file,)
+        assert not app._state.right.selected_entries
+        app._handle_key("esc")
+        assert not app._state.left.selected_entries
+    finally:
+        app._tasks.close()
+
+
+def test_index_scope_is_explicit(tmp_path: Path) -> None:
+    location = S3Location(bucket="bucket-commander", prefix="logs/")
+    app = BucketCommanderApp(AppConfig.from_paths(left=tmp_path, right=tmp_path))
+    indexer = FakeIndexer()
+    app._indexer = indexer  # type: ignore[assignment]
+    try:
+        app._state = TwoPanelState(
+            left=PanelState(location=location),
+            right=PanelState(location=parse_location(tmp_path)),
+        )
+        app._handle_key("I")
+        assert not app._tasks.records()
+        assert "Highlight an S3 prefix" in app._state.status_message
+        app._handle_key("i")
+        records = app._tasks.records()
+        assert len(records) == 1
+        wait_for_task(app._tasks, records[0].task_id)
+        assert indexer.calls == [location]
+    finally:
+        app._tasks.close()

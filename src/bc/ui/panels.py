@@ -22,20 +22,21 @@ COMMAND_BUTTON_WIDTH = 14
 PRIMARY_MOUSE_BUTTON = 1
 SECONDARY_MOUSE_BUTTON = 3
 COMMAND_BUTTONS = (
-    ("Help", "help"),
-    ("View", "view"),
-    ("Sort", "sort"),
-    ("Jobs", "jobs"),
-    ("New File", "new_file"),
-    ("Copy", "copy"),
-    ("Move", "move"),
-    ("New Folder", "new_folder"),
-    ("Delete", "delete"),
-    ("Quit", "quit"),
+    ("Help F1", "help"),
+    ("View F3", "view"),
+    ("Sort O", "sort"),
+    ("Jobs J", "jobs"),
+    ("New File F4", "new_file"),
+    ("Copy F5", "copy"),
+    ("Move F6", "move"),
+    ("Folder F7", "new_folder"),
+    ("Delete F8", "delete"),
+    ("Quit Q", "quit"),
 )
 BUCKET_COMMANDS = (
     ("Search", "search"),
-    ("Index", "index"),
+    ("Index current location (i)", "index"),
+    ("Index highlighted prefix (I)", "index_selected"),
     ("Cancel", "cancel"),
 )
 HELP_COMMANDS = (
@@ -45,6 +46,8 @@ HELP_COMMANDS = (
     ("Enter, Space, Right", "Open directory or prefix"),
     ("Backspace, Left", "Go to parent or leave search"),
     ("S", "Toggle selection"),
+    ("Ctrl-A", "Select all entries"),
+    ("Esc", "Leave search or clear selection"),
     ("R or Ctrl-R", "Refresh active panel"),
     ("F3", "View selected entry"),
     ("/", "Search indexed bucket metadata"),
@@ -56,7 +59,8 @@ HELP_COMMANDS = (
     ("F6", "Move selected entries"),
     ("F7", "Create a new folder"),
     ("F8 or Delete", "Delete selected entries"),
-    ("I", "Index current bucket or prefix recursively"),
+    ("i", "Index current bucket or prefix recursively"),
+    ("I", "Index highlighted prefix recursively"),
     ("C", "Cancel active task"),
     ("Q", "Quit Bucket Commander"),
 )
@@ -89,6 +93,7 @@ class UiCommand(StrEnum):
     NEW_FOLDER = "new_folder"
     DELETE = "delete"
     INDEX = "index"
+    INDEX_SELECTED = "index_selected"
     CANCEL = "cancel"
     QUIT = "quit"
 
@@ -850,7 +855,23 @@ def render_panel(
         focus_row=focus_row,
     )
     body = urwid.AttrMap(list_box, "panel_body")
-    panel_frame: urwid.Widget = urwid.Frame(body=body, header=header)
+    selected = panel.selected_entries
+    selection_text = (
+        f" {len(selected)} selected · {_format_bytes(sum(entry.size or 0 for entry in selected))}"
+        if selected
+        else " Focused item (no marked selection)"
+    )
+    current = panel.current_entry
+    detail = current.name if current is not None else "No entry focused"
+    if current is not None and current.modified_at is not None:
+        detail = f"{detail} · {_format_datetime(current.modified_at)}"
+    panel_footer = urwid.Pile(
+        [
+            ("pack", urwid.Text(selection_text, wrap="clip")),
+            ("pack", urwid.Text(f" {detail}", wrap="clip")),
+        ]
+    )
+    panel_frame: urwid.Widget = urwid.Frame(body=body, header=header, footer=panel_footer)
     border_attr = "panel_border_focus" if is_focused else "panel_border"
     return _bordered(panel_frame, border_attr)
 
@@ -860,10 +881,13 @@ def _entry_row(entry: Entry, *, is_current: bool, is_marked: bool) -> urwid.Widg
     selected = "*" if is_marked else " "
     marker = _entry_marker(entry.entry_type)
     size = _format_size(entry)
-    modified = _format_datetime(entry.modified_at)
-    row = urwid.Text(
-        f"{current}{selected} {marker} {entry.name:<38.38} {size:>10} {modified}",
-        wrap="clip",
+    row = urwid.Columns(
+        [
+            ("given", 4, urwid.Text(f"{current}{selected} {marker}")),
+            ("weight", 1, urwid.Text(entry.name, wrap="clip")),
+            ("given", 10, urwid.Text(size, align="right", wrap="clip")),
+        ],
+        dividechars=1,
     )
     if is_current:
         return urwid.AttrMap(row, "entry_current")

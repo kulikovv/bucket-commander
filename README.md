@@ -100,11 +100,14 @@ pipx install bucket-commander
 | `F6` | Move selected entries |
 | `F7` | Create a new folder |
 | `F8`, `Delete` | Delete selected entries |
-| `I` | Index current bucket or prefix recursively |
+| `i` | Index current bucket or prefix recursively |
+| `I` | Index highlighted prefix recursively |
 | `J` | Show jobs |
 | `G` | Show resolved settings |
 | `F1`, `?` | Show help |
-| `Q`, `Esc` | Quit |
+| `Ctrl-A` | Select all entries |
+| `Esc` | Leave search or clear selection |
+| `Q` | Quit |
 
 ## S3 Credentials
 

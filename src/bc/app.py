@@ -176,7 +176,12 @@ class BucketCommanderApp:
             return
         if self._handle_modal_key(key):
             return
-        if key in {"q", "Q", "esc"}:
+        if key == "esc":
+            if not self._leave_search_mode(self._state.focused):
+                panel = field_replace(self._state.active, selected_uris=frozenset())
+                self._update(self._state.with_panel(self._state.focused, panel))
+            return
+        if key in {"q", "Q"}:
             raise urwid.ExitMainLoop()
         if key in {"f1", "?"}:
             self._show_help_dialog()
@@ -209,6 +214,14 @@ class BucketCommanderApp:
             self._update(move_cursor(self._state, 1))
         elif key in {"enter", " ", "right"}:
             self._enter_active()
+        elif key == "ctrl a":
+            panel = self._state.active
+            selected = frozenset(entry.uri for entry in panel.entries if entry.name != "..")
+            self._update(
+                self._state.with_panel(
+                    self._state.focused, field_replace(panel, selected_uris=selected)
+                )
+            )
         elif key in {"s", "S"}:
             self._update(toggle_selection(self._state))
         elif key in {"backspace", "left", "\\"}:
@@ -272,7 +285,7 @@ class BucketCommanderApp:
         if self._create_prompt is None:
             return False
         kind, name = self._create_prompt
-        if key in {"esc", "q"}:
+        if key == "esc":
             self._close_create_prompt()
         elif key == "enter":
             self._apply_create_prompt()
@@ -303,7 +316,7 @@ class BucketCommanderApp:
     def _handle_search_key(self, key: str) -> bool:
         if self._search_panel is None:
             return False
-        if key in {"esc", "q"}:
+        if key == "esc":
             self._close_search_dialog()
         elif key == "enter":
             self._apply_search_dialog()
@@ -335,7 +348,9 @@ class BucketCommanderApp:
             self._show_create_prompt("folder")
         elif key in {"f8", "delete"}:
             self._start_delete_tasks()
-        elif key in {"i", "I"}:
+        elif key == "i":
+            self._start_index_task(current_location=True)
+        elif key == "I":
             self._start_index_task()
         elif key in {"c", "C"}:
             self._cancel_latest_task()
@@ -360,7 +375,8 @@ class BucketCommanderApp:
             UiCommand.MOVE: self._start_move_tasks,
             UiCommand.NEW_FOLDER: lambda: self._show_create_prompt("folder"),
             UiCommand.DELETE: self._start_delete_tasks,
-            UiCommand.INDEX: self._start_index_task,
+            UiCommand.INDEX: lambda: self._start_index_task(current_location=True),
+            UiCommand.INDEX_SELECTED: self._start_index_task,
             UiCommand.CANCEL: self._cancel_latest_task,
         }
         handlers[command]()
@@ -784,10 +800,18 @@ class BucketCommanderApp:
             return
         executor()
 
-    def _start_index_task(self) -> None:
-        target = self._index_target()
+    def _start_index_task(self, *, current_location: bool = False) -> None:
+        target = self._state.active.location if current_location else self._index_target()
+        if not isinstance(target, S3Location):
+            target = None
         if target is None:
-            self._update(self._state.with_status("Recursive indexing is only available for S3"))
+            self._update(
+                self._state.with_status(
+                    "Open an S3 location to index"
+                    if current_location
+                    else "Highlight an S3 prefix to index; use i for the current location"
+                )
+            )
             return
 
         async def index_task(
@@ -815,8 +839,6 @@ class BucketCommanderApp:
             and isinstance(current.location, S3Location)
         ):
             return current.location
-        if isinstance(panel.location, S3Location):
-            return panel.location
         return None
 
     def _apply_indexed_search(self, panel_id: PanelId, query: str) -> None:

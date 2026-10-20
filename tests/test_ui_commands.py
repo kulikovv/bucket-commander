@@ -178,7 +178,8 @@ def test_go_parent_refreshes_active_panel(tmp_path: Path) -> None:
     parent = run_async(go_parent(state, LocalBackend()))
 
     assert parent.left.location == parse_location(tmp_path)
-    assert "child" in [entry.name for entry in parent.left.entries]
+    assert parent.left.current_entry is not None
+    assert parent.left.current_entry.name == "child"
 
 
 def test_go_parent_supports_s3_prefix_locations(tmp_path: Path) -> None:
